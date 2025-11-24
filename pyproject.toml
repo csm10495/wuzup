@@ -1,0 +1,49 @@
+[project]
+name = "[PROJECT]"
+description = "A project for [PROJECT]"
+dynamic = ["version"]
+authors = [{name = "[USER]", email = "[EMAIL]"}]
+license = "MIT"
+classifiers = [
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: POSIX",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
+
+[project.urls]
+homepage = "https://github.com/[USER]/[PROJECT]"
+repository = "https://github.com/[USER]/[PROJECT]"
+documentation  = "https://[USER].github.io/[PROJECT]"
+
+[project.readme]
+file = "README.md"
+content-type = "text/markdown"
+
+[project.scripts]
+[PROJECT] = "[PROJECT].__main__:main"
+
+[tool.setuptools]
+packages = ["[PROJECT]"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "[PROJECT].__version__"}
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+
+[build-system]
+requires = ["setuptools>=61.2"]
+build-backend = "setuptools.build_meta"
