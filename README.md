@@ -1,3 +1,3 @@
-# [PROJECT]
+# wuzup
 
-A repo for [PROJECT]
+A repo for wuzup
