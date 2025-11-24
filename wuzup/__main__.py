@@ -34,7 +34,7 @@ def _debug_setup(debug: bool, debug_all: bool):
         logging.getLogger().setLevel(logging.DEBUG)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="wuzup cli")
     parser.add_argument("--debug", action="store_true", help="If given, turn on wuzup debug logging.")
     parser.add_argument("--debug-all", action="store_true", help="If given, turn on ALL debug logging globally.")
@@ -42,3 +42,7 @@ if __name__ == "__main__":
 
     _debug_setup(args.debug, args.debug_all)
     _ask_loop()
+
+
+if __name__ == "__main__":
+    main()
