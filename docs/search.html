@@ -100,7 +100,13 @@ class SearchResult(AISupport):
             or ddgs_result.get(&#34;publisher&#34;),
             image=ddgs_result.get(&#34;image&#34;),
             thumbnail=ddgs_result.get(&#34;thumbnail&#34;),
-        )</code></pre>
+        )
+
+    def _coerce_for_ai_equivalence(self):
+        data = super()._coerce_for_ai_equivalence()
+        if &#34;date&#34; in data:
+            del data[&#34;date&#34;]
+        return data</code></pre>
 </details>
 <div class="desc"><p>A wrapper around an individual search result.</p></div>
 <h3>Ancestors</h3>
