@@ -62,6 +62,12 @@ class SearchResult(AISupport):
             thumbnail=ddgs_result.get("thumbnail"),
         )
 
+    def _coerce_for_ai_equivalence(self):
+        data = super()._coerce_for_ai_equivalence()
+        if "date" in data:
+            del data["date"]
+        return data
+
 
 class Searcher:
     """

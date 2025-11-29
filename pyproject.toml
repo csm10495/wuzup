@@ -18,7 +18,8 @@ dependencies = [
     "backoff",
     "python-dotenv",
     "ddgs",
-    "python-dateutil"
+    "python-dateutil",
+    "diskcache"
 ]
 
 [project.optional-dependencies]

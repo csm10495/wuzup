@@ -28,6 +28,7 @@ NO = ("no", "false", "0")
 log = logging.getLogger(__name__)
 
 
+@lru_cache()
 def get_model() -> str:
     """
     Gets the AI model from the environment variable.
@@ -83,19 +84,21 @@ class AISupport:
             return False
 
         # If at the object level their vars are the same, no need to call AI.
-        if vars(self) == vars(other):
+        a_coerced = self._coerce_for_ai_equivalence()
+        b_coerced = other._coerce_for_ai_equivalence()
+        if a_coerced == b_coerced:
             return True
 
         # Wish us luck
         return ask_ai_for_boolean_response(
-            prompt=f"Are the two objects equivalent?: \nObject A: {self._coerce_for_ai_equivalence()}\nObject B: {other._coerce_for_ai_equivalence()}"
+            prompt=f"Are the two objects equivalent?: \nObject A: {a_coerced}\nObject B: {b_coerced}"
         )
 
     def _coerce_for_ai_equivalence(self) -> object:
         """
         Override this method to return a representation of the object suitable for AI equivalence checking.
         """
-        return self
+        return vars(self)
 
     def ask_ai_for_boolean_response_about_this(self, question: str) -> bool:
         """
