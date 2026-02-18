@@ -1,0 +1,157 @@
+"""Image loading, compositing, and OCR utilities."""
+
+import logging
+import os
+import shutil
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import urljoin
+
+import pytesseract
+import requests
+from bs4 import BeautifulSoup
+from PIL import Image
+
+_TESSERACT_DIR = r"C:\Program Files\Tesseract-OCR"
+if shutil.which("tesseract") is None and Path(_TESSERACT_DIR, "tesseract.exe").is_file():
+    os.environ["PATH"] = _TESSERACT_DIR + os.pathsep + os.environ.get("PATH", "")
+
+log = logging.getLogger(__name__)
+
+
+def load_image_from_path(path: str) -> Image.Image:
+    """Open a local image file and return it as a PIL Image.
+
+    Args:
+        path: Filesystem path to the image file.
+
+    Returns:
+        The opened PIL Image.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+    """
+    return Image.open(path)
+
+
+def load_image_from_url(url: str, selector: str | None = None) -> Image.Image:
+    """Fetch an image from a URL, optionally locating it via a CSS selector.
+
+    When *selector* is ``None`` the *url* is treated as a direct link to an
+    image.  When a *selector* is provided the page at *url* is fetched first,
+    the matching ``<img>`` element is found, and its ``src`` (or ``data-src``)
+    attribute is followed to retrieve the actual image.
+
+    Args:
+        url: URL pointing either directly to an image or to an HTML page
+            containing one.
+        selector: Optional CSS selector used to locate an ``<img>`` element
+            on the page.
+
+    Returns:
+        The fetched PIL Image.
+
+    Raises:
+        ValueError: If the selector matches no element, or the matched element
+            has no ``src`` / ``data-src`` attribute.
+        requests.HTTPError: If any HTTP request fails.
+    """
+    if selector:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        element = soup.select_one(selector)
+        if element is None:
+            raise ValueError(f"No element found matching selector: {selector}")
+
+        img_url = element.get("src") or element.get("data-src")
+        if not img_url:
+            raise ValueError(f"Element matching selector '{selector}' has no src or data-src attribute")
+
+        img_url = urljoin(url, img_url)
+        log.debug(f"Found image URL: {img_url}")
+    else:
+        img_url = url
+
+    response = requests.get(img_url, timeout=30)
+    response.raise_for_status()
+    return Image.open(BytesIO(response.content))
+
+
+def composite_on_color(image: Image.Image, color: tuple[int, int, int]) -> Image.Image:
+    """Composite an RGBA image onto a solid-color background.
+
+    If the input image is not already RGBA it is converted first.  The
+    alpha channel is used as the paste mask so that transparent regions
+    reveal the background *color*.
+
+    Args:
+        image: Source image (any mode; will be converted to RGBA).
+        color: RGB tuple used as the background fill color.
+
+    Returns:
+        A new RGB image with the source composited over the background.
+    """
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    bg = Image.new("RGB", image.size, color)
+    bg.paste(image, mask=image.split()[3])
+    return bg
+
+
+def ocr_variant(variant: Image.Image) -> str:
+    """Run Tesseract OCR on a single image variant.
+
+    Args:
+        variant: A PIL Image to perform OCR on.
+
+    Returns:
+        The recognised text with leading/trailing whitespace stripped.
+    """
+    return pytesseract.image_to_string(variant).strip()
+
+
+def image_to_text(image: Image.Image) -> str:
+    """Extract text from an image using multiple OCR passes.
+
+    The image is composited onto both a white and a black background and
+    the individual R, G, and B channels of the white-background version
+    are also extracted.  OCR is run on all five variants and the unique
+    lines (compared case-insensitively) are collected in order.
+
+    Args:
+        image: Source image (typically RGBA or RGB).
+
+    Returns:
+        A newline-joined string of unique OCR-detected lines.
+    """
+    # Composite on both white and black backgrounds.
+    # White bg: makes dark/colored text visible (normal case).
+    # Black bg: makes light/white text visible (text that's invisible on white).
+    on_white = composite_on_color(image, (255, 255, 255))
+    on_black = composite_on_color(image, (0, 0, 0))
+
+    # Per-channel extraction from the white-bg version to catch colored text
+    # e.g. cyan text has R≈0 on white R=255 → high contrast in R channel
+    r_ch = on_white.getchannel("R")
+    g_ch = on_white.getchannel("G")
+    b_ch = on_white.getchannel("B")
+
+    variants = [on_white, on_black, r_ch, g_ch, b_ch]
+
+    # Collect unique lines across all variants
+    seen: set[str] = set()
+    all_lines: list[str] = []
+
+    for v in variants:
+        text = ocr_variant(v)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                all_lines.append(line)
+
+    return "\n".join(all_lines)

@@ -14,12 +14,10 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "litellm",
-    "backoff",
-    "python-dotenv",
-    "ddgs",
-    "python-dateutil",
-    "diskcache"
+    "pytesseract",
+    "Pillow",
+    "requests",
+    "beautifulsoup4",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +35,7 @@ file = "README.md"
 content-type = "text/markdown"
 
 [project.scripts]
-wuzup = "wuzup.__main__:main"
+wuzup = "wuzup.cli:main"
 
 [tool.setuptools]
 packages = ["wuzup"]
@@ -49,6 +47,9 @@ version = {attr = "wuzup.__version__"}
 [tool.pytest.ini_options]
 pythonpath = [
     "."
+]
+markers = [
+    "integration: tests requiring network access",
 ]
 
 [build-system]
