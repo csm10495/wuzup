@@ -15,11 +15,14 @@ from PIL import Image
 
 # When bundled via PyInstaller, Tesseract is included in the _MEIPASS directory.
 _BUNDLED_TESSERACT_DIR = Path(getattr(sys, "_MEIPASS", ""), "tesseract")
-_TESSERACT_DIR = r"C:\Program Files\Tesseract-OCR"
+_TESSERACT_BINARY = "tesseract.exe" if sys.platform == "win32" else "tesseract"
+_FALLBACK_DIRS = [_BUNDLED_TESSERACT_DIR]
+if sys.platform == "win32":
+    _FALLBACK_DIRS.append(Path(r"C:\Program Files\Tesseract-OCR"))
 
 if shutil.which("tesseract") is None:
-    for _dir in [_BUNDLED_TESSERACT_DIR, Path(_TESSERACT_DIR)]:
-        if (_dir / "tesseract.exe").is_file():
+    for _dir in _FALLBACK_DIRS:
+        if (_dir / _TESSERACT_BINARY).is_file():
             os.environ["PATH"] = str(_dir) + os.pathsep + os.environ.get("PATH", "")
             break
 
