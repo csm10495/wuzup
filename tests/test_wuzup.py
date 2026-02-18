@@ -3,7 +3,7 @@
 import logging
 import subprocess
 import sys
-from io import BytesIO
+from io import BytesIO, StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -469,6 +469,20 @@ class TestMain:
         ):
             main()
             mock_debug.assert_called_once_with(True, True)
+
+    def test_explicit_args_parameter(self, capsys):
+        """Passing args directly should bypass sys.argv."""
+        with patch("wuzup.cli._image_to_text_command", return_value="from args") as mock_cmd:
+            main(["image-to-text", "--path", "/tmp/img.png"])
+            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selector=None)
+        assert capsys.readouterr().out.strip() == "from args"
+
+    def test_output_parameter(self):
+        """Passing output should write there instead of stdout."""
+        buf = StringIO()
+        with patch("wuzup.cli._image_to_text_command", return_value="to buffer"):
+            main(["image-to-text", "--path", "/tmp/img.png"], output=buf)
+        assert buf.getvalue().strip() == "to buffer"
 
 
 # ---------------------------------------------------------------------------

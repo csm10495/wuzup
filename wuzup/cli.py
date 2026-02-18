@@ -1,7 +1,9 @@
 """Command-line interface for wuzup."""
 
 import argparse
+import io
 import logging
+import sys
 
 from wuzup.image import image_to_text, load_image_from_path, load_image_from_url
 
@@ -55,12 +57,17 @@ def _image_to_text_command(
     return image_to_text(image)
 
 
-def main():
+def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
     """Entry point for the ``wuzup`` CLI.
 
-    Parses command-line arguments, configures logging, and dispatches to
-    the appropriate sub-command handler.
+    Args:
+        args: Optional list of command-line arguments. If ``None``,
+            ``sys.argv`` is used (via ``argparse`` default behavior).
+        output: Optional writable text stream. If ``None``, defaults
+            to ``sys.stdout``.
     """
+    if output is None:
+        output = sys.stdout
     parser = argparse.ArgumentParser(description="wuzup - a multi-tool CLI")
     parser.add_argument("--debug", action="store_true", help="If given, turn on wuzup debug logging.")
     parser.add_argument("--debug-all", action="store_true", help="If given, turn on ALL debug logging globally.")
@@ -77,13 +84,13 @@ def main():
         "-s", "--selector", type=str, help="CSS selector to find the image on the page (only with --url)."
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
 
     if args.command in ("image-to-text", "i2t", "itt"):
         if args.selector and not args.url:
             parser.error("--selector can only be used with --url")
-        print(_image_to_text_command(path=args.path, url=args.url, selector=args.selector))
+        print(_image_to_text_command(path=args.path, url=args.url, selector=args.selector), file=output)
 
 
 if __name__ == "__main__":
