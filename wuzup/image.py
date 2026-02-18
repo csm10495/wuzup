@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import sys
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin
@@ -12,9 +13,15 @@ import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
+# When bundled via PyInstaller, Tesseract is included in the _MEIPASS directory.
+_BUNDLED_TESSERACT_DIR = Path(getattr(sys, "_MEIPASS", ""), "tesseract")
 _TESSERACT_DIR = r"C:\Program Files\Tesseract-OCR"
-if shutil.which("tesseract") is None and Path(_TESSERACT_DIR, "tesseract.exe").is_file():
-    os.environ["PATH"] = _TESSERACT_DIR + os.pathsep + os.environ.get("PATH", "")
+
+if shutil.which("tesseract") is None:
+    for _dir in [_BUNDLED_TESSERACT_DIR, Path(_TESSERACT_DIR)]:
+        if (_dir / "tesseract.exe").is_file():
+            os.environ["PATH"] = str(_dir) + os.pathsep + os.environ.get("PATH", "")
+            break
 
 log = logging.getLogger(__name__)
 

@@ -41,6 +41,8 @@ jobs:
       operating-system: 'windows-latest'
       executable-name: wuzup.exe
       entrypoint-file: wuzup/__main__.py
+      pre-build-cmd: choco install tesseract -y
+      extra-args: '--add-data "C:\Program Files\Tesseract-OCR;tesseract"'
 
   pypi-upload:
     needs: pdoc3
