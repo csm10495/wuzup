@@ -46,19 +46,24 @@ el.replaceWith(d);
 <h2 class="section-title" id="header-functions">Functions</h2>
 <dl>
 <dt id="wuzup.cli.main"><code class="name flex">
-<span>def <span class="ident">main</span></span>(<span>)</span>
+<span>def <span class="ident">main</span></span>(<span>args: list[str] | None = None, output: io.TextIOBase | None = None)</span>
 </code></dt>
 <dd>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def main():
+<pre><code class="python">def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
     &#34;&#34;&#34;Entry point for the ``wuzup`` CLI.
 
-    Parses command-line arguments, configures logging, and dispatches to
-    the appropriate sub-command handler.
+    Args:
+        args: Optional list of command-line arguments. If ``None``,
+            ``sys.argv`` is used (via ``argparse`` default behavior).
+        output: Optional writable text stream. If ``None``, defaults
+            to ``sys.stdout``.
     &#34;&#34;&#34;
+    if output is None:
+        output = sys.stdout
     parser = argparse.ArgumentParser(description=&#34;wuzup - a multi-tool CLI&#34;)
     parser.add_argument(&#34;--debug&#34;, action=&#34;store_true&#34;, help=&#34;If given, turn on wuzup debug logging.&#34;)
     parser.add_argument(&#34;--debug-all&#34;, action=&#34;store_true&#34;, help=&#34;If given, turn on ALL debug logging globally.&#34;)
@@ -75,17 +80,24 @@ el.replaceWith(d);
         &#34;-s&#34;, &#34;--selector&#34;, type=str, help=&#34;CSS selector to find the image on the page (only with --url).&#34;
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
 
     if args.command in (&#34;image-to-text&#34;, &#34;i2t&#34;, &#34;itt&#34;):
         if args.selector and not args.url:
             parser.error(&#34;--selector can only be used with --url&#34;)
-        print(_image_to_text_command(path=args.path, url=args.url, selector=args.selector))</code></pre>
+        print(_image_to_text_command(path=args.path, url=args.url, selector=args.selector), file=output)</code></pre>
 </details>
 <div class="desc"><p>Entry point for the <code><a title="wuzup" href="index.html">wuzup</a></code> CLI.</p>
-<p>Parses command-line arguments, configures logging, and dispatches to
-the appropriate sub-command handler.</p></div>
+<h2 id="args">Args</h2>
+<dl>
+<dt><strong><code>args</code></strong></dt>
+<dd>Optional list of command-line arguments. If <code>None</code>,
+<code>sys.argv</code> is used (via <code>argparse</code> default behavior).</dd>
+<dt><strong><code>output</code></strong></dt>
+<dd>Optional writable text stream. If <code>None</code>, defaults
+to <code>sys.stdout</code>.</dd>
+</dl></div>
 </dd>
 </dl>
 </section>
