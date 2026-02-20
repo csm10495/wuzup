@@ -44,7 +44,7 @@ def load_image_from_path(path: str) -> Image.Image:
     return Image.open(path)
 
 
-def load_images_from_url(url: str, selectors: list[str] | None = None) -> list[Image.Image]:
+def load_images_from_url(url: str, selectors: list[str] | None = None, timeout: float = 30) -> list[Image.Image]:
     """Fetch images from a URL, optionally locating them via CSS selectors.
 
     When *selectors* is ``None`` the *url* is treated as a direct link to an
@@ -57,6 +57,7 @@ def load_images_from_url(url: str, selectors: list[str] | None = None) -> list[I
             containing one.
         selectors: Optional list of CSS selectors used to locate ``<img>``
             elements on the page.  Images matching *any* selector are returned.
+        timeout: Timeout in seconds for each HTTP request.
 
     Returns:
         A list of fetched PIL Images.
@@ -67,7 +68,7 @@ def load_images_from_url(url: str, selectors: list[str] | None = None) -> list[I
         requests.HTTPError: If any HTTP request fails.
     """
     if selectors:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
@@ -91,12 +92,12 @@ def load_images_from_url(url: str, selectors: list[str] | None = None) -> list[I
 
         images: list[Image.Image] = []
         for img_url in img_urls:
-            resp = requests.get(img_url, timeout=30)
+            resp = requests.get(img_url, timeout=timeout)
             resp.raise_for_status()
             images.append(Image.open(BytesIO(resp.content)))
         return images
     else:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         return [Image.open(BytesIO(response.content))]
 

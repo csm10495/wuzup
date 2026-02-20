@@ -35,6 +35,7 @@ def _images_to_text_command(
     path: str | None = None,
     url: str | None = None,
     selectors: list[str] | None = None,
+    timeout: float = 30,
 ) -> str:
     """Load image(s) and extract text via OCR.
 
@@ -46,6 +47,7 @@ def _images_to_text_command(
         selectors: Optional list of CSS selectors to locate ``<img>``
             elements on the page (only used with *url*).  Images matching
             *any* selector are processed.
+        timeout: Timeout in seconds for HTTP requests.
 
     Returns:
         The OCR-extracted text from all matched images.
@@ -53,7 +55,7 @@ def _images_to_text_command(
     if path:
         images = [load_image_from_path(path)]
     else:
-        images = load_images_from_url(url, selectors)
+        images = load_images_from_url(url, selectors, timeout=timeout)
 
     all_lines: list[str] = []
     seen: set[str] = set()
@@ -99,6 +101,13 @@ def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
         dest="selectors",
         help="CSS selector to find an image on the page (only with --url). Can be specified multiple times.",
     )
+    itt_parser.add_argument(
+        "-T",
+        "--timeout",
+        type=float,
+        default=30,
+        help="Timeout in seconds for HTTP requests (default: 30).",
+    )
 
     args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
@@ -106,7 +115,10 @@ def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
     if args.command in ("image-to-text", "i2t", "itt"):
         if args.selectors and not args.url:
             parser.error("--selector can only be used with --url")
-        print(_images_to_text_command(path=args.path, url=args.url, selectors=args.selectors), file=output)
+        print(
+            _images_to_text_command(path=args.path, url=args.url, selectors=args.selectors, timeout=args.timeout),
+            file=output,
+        )
 
 
 if __name__ == "__main__":

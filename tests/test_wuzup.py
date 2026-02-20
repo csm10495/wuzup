@@ -227,6 +227,39 @@ class TestLoadImagesFromUrl:
             with pytest.raises(requests.HTTPError):
                 load_images_from_url("http://example.com/bad.png")
 
+    def test_custom_timeout_direct_url(self):
+        """Custom timeout should be forwarded to requests.get for direct URL."""
+        img_bytes = _image_to_bytes(_make_rgb_image())
+        mock_resp = MagicMock()
+        mock_resp.content = img_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("wuzup.image.requests.get", return_value=mock_resp) as mock_get:
+            load_images_from_url("http://example.com/img.png", timeout=5)
+            mock_get.assert_called_once_with("http://example.com/img.png", timeout=5)
+
+    def test_custom_timeout_with_selectors(self):
+        """Custom timeout should be forwarded to all requests.get calls when using selectors."""
+        html = '<html><body><img id="target" src="/images/photo.png"></body></html>'
+        img_bytes = _image_to_bytes(_make_rgb_image())
+
+        page_resp = MagicMock()
+        page_resp.text = html
+        page_resp.raise_for_status = MagicMock()
+
+        img_resp = MagicMock()
+        img_resp.content = img_bytes
+        img_resp.raise_for_status = MagicMock()
+
+        responses = iter([page_resp, img_resp])
+
+        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)) as mock_get:
+            load_images_from_url("http://example.com/page", selectors=["#target"], timeout=10)
+            # Both the page fetch and image fetch should use the custom timeout
+            assert mock_get.call_count == 2
+            for call in mock_get.call_args_list:
+                assert call.kwargs["timeout"] == 10
+
 
 # ---------------------------------------------------------------------------
 # _composite_on_color
@@ -373,7 +406,7 @@ class TestImageToTextCommand:
             patch("wuzup.cli.image_to_text", return_value="URL text") as mock_ocr,
         ):
             result = _images_to_text_command(url="http://example.com/img.png")
-            mock_load.assert_called_once_with("http://example.com/img.png", None)
+            mock_load.assert_called_once_with("http://example.com/img.png", None, timeout=30)
             mock_ocr.assert_called_once_with(mock_img)
         assert result == "URL text"
 
@@ -385,8 +418,19 @@ class TestImageToTextCommand:
             patch("wuzup.cli.image_to_text", return_value="selected"),
         ):
             result = _images_to_text_command(url="http://example.com/page", selectors=["#main-img"])
-            mock_load.assert_called_once_with("http://example.com/page", ["#main-img"])
+            mock_load.assert_called_once_with("http://example.com/page", ["#main-img"], timeout=30)
         assert result == "selected"
+
+    def test_custom_timeout(self):
+        """Custom timeout should be forwarded to load_images_from_url."""
+        mock_img = _make_rgb_image()
+        with (
+            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
+            patch("wuzup.cli.image_to_text", return_value="timed"),
+        ):
+            result = _images_to_text_command(url="http://example.com/img.png", timeout=5)
+            mock_load.assert_called_once_with("http://example.com/img.png", None, timeout=5)
+        assert result == "timed"
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +452,7 @@ class TestMain:
             patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None)
+            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None, timeout=30)
 
     def test_i2t_alias(self):
         """i2t alias should work identically."""
@@ -426,7 +470,7 @@ class TestMain:
             patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None)
+            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None, timeout=30)
 
     def test_url_with_selector(self):
         with (
@@ -434,7 +478,7 @@ class TestMain:
             patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com", selectors=["img.hero"])
+            mock_cmd.assert_called_once_with(path=None, url="http://example.com", selectors=["img.hero"], timeout=30)
 
     def test_main_prints_command_result(self, capsys):
         """main() should print the return value of _images_to_text_command."""
@@ -495,8 +539,17 @@ class TestMain:
         """Passing args directly should bypass sys.argv."""
         with patch("wuzup.cli._images_to_text_command", return_value="from args") as mock_cmd:
             main(["image-to-text", "--path", "/tmp/img.png"])
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None)
+            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None, timeout=30)
         assert capsys.readouterr().out.strip() == "from args"
+
+    def test_timeout_flag(self):
+        """--timeout should be forwarded to _images_to_text_command."""
+        with (
+            patch("sys.argv", ["wuzup", "image-to-text", "--url", "http://example.com/img.png", "-T", "10"]),
+            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
+        ):
+            main()
+            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None, timeout=10.0)
 
     def test_output_parameter(self):
         """Passing output should write there instead of stdout."""
