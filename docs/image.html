@@ -191,79 +191,93 @@ lines (compared case-insensitively) are collected in order.</p>
 <dd>If the file does not exist.</dd>
 </dl></div>
 </dd>
-<dt id="wuzup.image.load_image_from_url"><code class="name flex">
-<span>def <span class="ident">load_image_from_url</span></span>(<span>url: str, selector: str | None = None) ‑> PIL.Image.Image</span>
+<dt id="wuzup.image.load_images_from_url"><code class="name flex">
+<span>def <span class="ident">load_images_from_url</span></span>(<span>url: str, selectors: list[str] | None = None) ‑> list[PIL.Image.Image]</span>
 </code></dt>
 <dd>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def load_image_from_url(url: str, selector: str | None = None) -&gt; Image.Image:
-    &#34;&#34;&#34;Fetch an image from a URL, optionally locating it via a CSS selector.
+<pre><code class="python">def load_images_from_url(url: str, selectors: list[str] | None = None) -&gt; list[Image.Image]:
+    &#34;&#34;&#34;Fetch images from a URL, optionally locating them via CSS selectors.
 
-    When *selector* is ``None`` the *url* is treated as a direct link to an
-    image.  When a *selector* is provided the page at *url* is fetched first,
-    the matching ``&lt;img&gt;`` element is found, and its ``src`` (or ``data-src``)
-    attribute is followed to retrieve the actual image.
+    When *selectors* is ``None`` the *url* is treated as a direct link to an
+    image.  When *selectors* are provided the page at *url* is fetched first,
+    elements matching **any** of the selectors are found, and their ``src``
+    (or ``data-src``) attributes are followed to retrieve the actual images.
 
     Args:
         url: URL pointing either directly to an image or to an HTML page
             containing one.
-        selector: Optional CSS selector used to locate an ``&lt;img&gt;`` element
-            on the page.
+        selectors: Optional list of CSS selectors used to locate ``&lt;img&gt;``
+            elements on the page.  Images matching *any* selector are returned.
 
     Returns:
-        The fetched PIL Image.
+        A list of fetched PIL Images.
 
     Raises:
-        ValueError: If the selector matches no element, or the matched element
-            has no ``src`` / ``data-src`` attribute.
+        ValueError: If no selector matches any element, or if every matched
+            element lacks a ``src`` / ``data-src`` attribute.
         requests.HTTPError: If any HTTP request fails.
     &#34;&#34;&#34;
-    if selector:
+    if selectors:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, &#34;html.parser&#34;)
-        element = soup.select_one(selector)
-        if element is None:
-            raise ValueError(f&#34;No element found matching selector: {selector}&#34;)
 
-        img_url = element.get(&#34;src&#34;) or element.get(&#34;data-src&#34;)
-        if not img_url:
-            raise ValueError(f&#34;Element matching selector &#39;{selector}&#39; has no src or data-src attribute&#34;)
+        img_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for selector in selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                img_url = element.get(&#34;src&#34;) or element.get(&#34;data-src&#34;)
+                if img_url:
+                    resolved = urljoin(url, img_url)
+                    if resolved not in seen_urls:
+                        seen_urls.add(resolved)
+                        img_urls.append(resolved)
+                        log.debug(f&#34;Found image URL: {resolved}&#34;)
+                else:
+                    log.debug(f&#34;Element matching selector &#39;{selector}&#39; has no src or data-src attribute, skipping&#34;)
 
-        img_url = urljoin(url, img_url)
-        log.debug(f&#34;Found image URL: {img_url}&#34;)
+        if not img_urls:
+            raise ValueError(f&#34;No images found matching any selector: {selectors}&#34;)
+
+        images: list[Image.Image] = []
+        for img_url in img_urls:
+            resp = requests.get(img_url, timeout=30)
+            resp.raise_for_status()
+            images.append(Image.open(BytesIO(resp.content)))
+        return images
     else:
-        img_url = url
-
-    response = requests.get(img_url, timeout=30)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content))</code></pre>
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return [Image.open(BytesIO(response.content))]</code></pre>
 </details>
-<div class="desc"><p>Fetch an image from a URL, optionally locating it via a CSS selector.</p>
-<p>When <em>selector</em> is <code>None</code> the <em>url</em> is treated as a direct link to an
+<div class="desc"><p>Fetch images from a URL, optionally locating them via CSS selectors.</p>
+<p>When <em>selectors</em> is <code>None</code> the <em>url</em> is treated as a direct link to an
 image.
-When a <em>selector</em> is provided the page at <em>url</em> is fetched first,
-the matching <code>&lt;img&gt;</code> element is found, and its <code>src</code> (or <code>data-src</code>)
-attribute is followed to retrieve the actual image.</p>
+When <em>selectors</em> are provided the page at <em>url</em> is fetched first,
+elements matching <strong>any</strong> of the selectors are found, and their <code>src</code>
+(or <code>data-src</code>) attributes are followed to retrieve the actual images.</p>
 <h2 id="args">Args</h2>
 <dl>
 <dt><strong><code>url</code></strong></dt>
 <dd>URL pointing either directly to an image or to an HTML page
 containing one.</dd>
-<dt><strong><code>selector</code></strong></dt>
-<dd>Optional CSS selector used to locate an <code>&lt;img&gt;</code> element
-on the page.</dd>
+<dt><strong><code>selectors</code></strong></dt>
+<dd>Optional list of CSS selectors used to locate <code>&lt;img&gt;</code>
+elements on the page.
+Images matching <em>any</em> selector are returned.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
-<p>The fetched PIL Image.</p>
+<p>A list of fetched PIL Images.</p>
 <h2 id="raises">Raises</h2>
 <dl>
 <dt><code>ValueError</code></dt>
-<dd>If the selector matches no element, or the matched element
-has no <code>src</code> / <code>data-src</code> attribute.</dd>
+<dd>If no selector matches any element, or if every matched
+element lacks a <code>src</code> / <code>data-src</code> attribute.</dd>
 <dt><code>requests.HTTPError</code></dt>
 <dd>If any HTTP request fails.</dd>
 </dl></div>
@@ -316,7 +330,7 @@ has no <code>src</code> / <code>data-src</code> attribute.</dd>
 <li><code><a title="wuzup.image.composite_on_color" href="#wuzup.image.composite_on_color">composite_on_color</a></code></li>
 <li><code><a title="wuzup.image.image_to_text" href="#wuzup.image.image_to_text">image_to_text</a></code></li>
 <li><code><a title="wuzup.image.load_image_from_path" href="#wuzup.image.load_image_from_path">load_image_from_path</a></code></li>
-<li><code><a title="wuzup.image.load_image_from_url" href="#wuzup.image.load_image_from_url">load_image_from_url</a></code></li>
+<li><code><a title="wuzup.image.load_images_from_url" href="#wuzup.image.load_images_from_url">load_images_from_url</a></code></li>
 <li><code><a title="wuzup.image.ocr_variant" href="#wuzup.image.ocr_variant">ocr_variant</a></code></li>
 </ul>
 </li>
