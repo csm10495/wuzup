@@ -11,14 +11,14 @@ from PIL import Image
 
 from wuzup.cli import (
     _debug_setup,
-    _image_to_text_command,
+    _images_to_text_command,
     main,
 )
 from wuzup.image import (
     composite_on_color,
     image_to_text,
     load_image_from_path,
-    load_image_from_url,
+    load_images_from_url,
     ocr_variant,
 )
 
@@ -102,22 +102,28 @@ class TestLoadImageFromPath:
 
 
 # ---------------------------------------------------------------------------
-# _load_image_from_url
+# _load_images_from_url
 # ---------------------------------------------------------------------------
 
 
-class TestLoadImageFromUrl:
+class TestLoadImagesFromUrl:
     def test_direct_url(self):
-        """Without a selector, should fetch the URL directly as an image."""
+        """Without selectors, should fetch the URL directly as an image."""
         img_bytes = _image_to_bytes(_make_rgb_image())
         mock_resp = MagicMock()
         mock_resp.content = img_bytes
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("wuzup.image.requests.get", return_value=mock_resp) as mock_get:
-            result = load_image_from_url("http://example.com/img.png")
-            mock_get.assert_called_once_with("http://example.com/img.png", timeout=30)
-            assert isinstance(result, Image.Image)
+        def fake_get(url, **kwargs):
+            assert url == "http://example.com/img.png"
+            assert kwargs == {"timeout": 30}
+            return mock_resp
+
+        with patch("wuzup.image.requests.get", side_effect=fake_get):
+            result = load_images_from_url("http://example.com/img.png")
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert isinstance(result[0], Image.Image)
 
     def test_with_selector_finds_src(self):
         """With a selector, should parse HTML page and follow src attribute."""
@@ -132,12 +138,16 @@ class TestLoadImageFromUrl:
         img_resp.content = img_bytes
         img_resp.raise_for_status = MagicMock()
 
-        with patch("wuzup.image.requests.get", side_effect=[page_resp, img_resp]) as mock_get:
-            result = load_image_from_url("http://example.com/page", selector="#target")
+        responses = iter([page_resp, img_resp])
+
+        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)) as mock_get:
+            result = load_images_from_url("http://example.com/page", selectors=["#target"])
             assert mock_get.call_count == 2
             # Second call should resolve relative URL
             mock_get.assert_called_with("http://example.com/images/photo.png", timeout=30)
-            assert isinstance(result, Image.Image)
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert isinstance(result[0], Image.Image)
 
     def test_with_selector_finds_data_src(self):
         """Should fall back to data-src when src is absent."""
@@ -152,9 +162,13 @@ class TestLoadImageFromUrl:
         img_resp.content = img_bytes
         img_resp.raise_for_status = MagicMock()
 
-        with patch("wuzup.image.requests.get", side_effect=[page_resp, img_resp]):
-            result = load_image_from_url("http://example.com/page", selector=".lazy")
-            assert isinstance(result, Image.Image)
+        responses = iter([page_resp, img_resp])
+
+        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)):
+            result = load_images_from_url("http://example.com/page", selectors=[".lazy"])
+            assert isinstance(result, list)
+            assert len(result) == 1
+            assert isinstance(result[0], Image.Image)
 
     def test_with_selector_no_match_raises(self):
         """Should raise ValueError when selector matches no element."""
@@ -164,19 +178,19 @@ class TestLoadImageFromUrl:
         page_resp.raise_for_status = MagicMock()
 
         with patch("wuzup.image.requests.get", return_value=page_resp):
-            with pytest.raises(ValueError, match="No element found matching selector"):
-                load_image_from_url("http://example.com/page", selector="#missing")
+            with pytest.raises(ValueError, match="No images found matching any selector"):
+                load_images_from_url("http://example.com/page", selectors=["#missing"])
 
-    def test_with_selector_element_no_src_raises(self):
-        """Should raise ValueError when matched element has no src/data-src."""
+    def test_with_selector_element_no_src_skipped(self):
+        """Element with no src/data-src should be skipped; raises if no images found."""
         html = '<html><body><div id="nosrc">hello</div></body></html>'
         page_resp = MagicMock()
         page_resp.text = html
         page_resp.raise_for_status = MagicMock()
 
         with patch("wuzup.image.requests.get", return_value=page_resp):
-            with pytest.raises(ValueError, match="has no src or data-src attribute"):
-                load_image_from_url("http://example.com/page", selector="#nosrc")
+            with pytest.raises(ValueError, match="No images found matching any selector"):
+                load_images_from_url("http://example.com/page", selectors=["#nosrc"])
 
     def test_relative_url_joined(self):
         """Relative src should be resolved against the base page URL."""
@@ -191,9 +205,16 @@ class TestLoadImageFromUrl:
         img_resp.content = img_bytes
         img_resp.raise_for_status = MagicMock()
 
-        with patch("wuzup.image.requests.get", side_effect=[page_resp, img_resp]) as mock_get:
-            load_image_from_url("http://example.com/dir/page", selector="#img")
-            mock_get.assert_called_with("http://example.com/dir/relative/pic.png", timeout=30)
+        responses = iter([page_resp, img_resp])
+        calls = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            return next(responses)
+
+        with patch("wuzup.image.requests.get", side_effect=fake_get):
+            load_images_from_url("http://example.com/dir/page", selectors=["#img"])
+            assert calls[-1] == "http://example.com/dir/relative/pic.png"
 
     def test_http_error_propagated(self):
         """requests exceptions should propagate."""
@@ -204,7 +225,7 @@ class TestLoadImageFromUrl:
 
         with patch("wuzup.image.requests.get", return_value=mock_resp):
             with pytest.raises(requests.HTTPError):
-                load_image_from_url("http://example.com/bad.png")
+                load_images_from_url("http://example.com/bad.png")
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +348,7 @@ class TestImageToText:
 
 
 # ---------------------------------------------------------------------------
-# _image_to_text_command
+# _images_to_text_command
 # ---------------------------------------------------------------------------
 
 
@@ -339,7 +360,7 @@ class TestImageToTextCommand:
             patch("wuzup.cli.load_image_from_path", return_value=mock_img) as mock_load,
             patch("wuzup.cli.image_to_text", return_value="OCR result") as mock_ocr,
         ):
-            result = _image_to_text_command(path="/some/img.png")
+            result = _images_to_text_command(path="/some/img.png")
             mock_load.assert_called_once_with("/some/img.png")
             mock_ocr.assert_called_once_with(mock_img)
         assert result == "OCR result"
@@ -348,23 +369,23 @@ class TestImageToTextCommand:
         """When url is given, should load from URL and return OCR result."""
         mock_img = _make_rgb_image()
         with (
-            patch("wuzup.cli.load_image_from_url", return_value=mock_img) as mock_load,
+            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
             patch("wuzup.cli.image_to_text", return_value="URL text") as mock_ocr,
         ):
-            result = _image_to_text_command(url="http://example.com/img.png")
+            result = _images_to_text_command(url="http://example.com/img.png")
             mock_load.assert_called_once_with("http://example.com/img.png", None)
             mock_ocr.assert_called_once_with(mock_img)
         assert result == "URL text"
 
     def test_url_with_selector(self):
-        """Selector should be passed through to load_image_from_url."""
+        """Selectors should be passed through to load_images_from_url."""
         mock_img = _make_rgb_image()
         with (
-            patch("wuzup.cli.load_image_from_url", return_value=mock_img) as mock_load,
+            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
             patch("wuzup.cli.image_to_text", return_value="selected"),
         ):
-            result = _image_to_text_command(url="http://example.com/page", selector="#main-img")
-            mock_load.assert_called_once_with("http://example.com/page", "#main-img")
+            result = _images_to_text_command(url="http://example.com/page", selectors=["#main-img"])
+            mock_load.assert_called_once_with("http://example.com/page", ["#main-img"])
         assert result == "selected"
 
 
@@ -381,19 +402,19 @@ class TestMain:
                 main()
 
     def test_image_to_text_path(self):
-        """image-to-text --path should call _image_to_text_command."""
+        """image-to-text --path should call _images_to_text_command."""
         with (
             patch("sys.argv", ["wuzup", "image-to-text", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value="") as mock_cmd,
+            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selector=None)
+            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None)
 
     def test_i2t_alias(self):
         """i2t alias should work identically."""
         with (
             patch("sys.argv", ["wuzup", "i2t", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value="") as mock_cmd,
+            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
             mock_cmd.assert_called_once()
@@ -402,24 +423,24 @@ class TestMain:
         """itt alias should work identically."""
         with (
             patch("sys.argv", ["wuzup", "itt", "--url", "http://example.com/img.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value="") as mock_cmd,
+            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selector=None)
+            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None)
 
     def test_url_with_selector(self):
         with (
             patch("sys.argv", ["wuzup", "image-to-text", "--url", "http://example.com", "-s", "img.hero"]),
-            patch("wuzup.cli._image_to_text_command", return_value="") as mock_cmd,
+            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
         ):
             main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com", selector="img.hero")
+            mock_cmd.assert_called_once_with(path=None, url="http://example.com", selectors=["img.hero"])
 
     def test_main_prints_command_result(self, capsys):
-        """main() should print the return value of _image_to_text_command."""
+        """main() should print the return value of _images_to_text_command."""
         with (
             patch("sys.argv", ["wuzup", "image-to-text", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value="printed text"),
+            patch("wuzup.cli._images_to_text_command", return_value="printed text"),
         ):
             main()
         captured = capsys.readouterr()
@@ -446,7 +467,7 @@ class TestMain:
     def test_debug_flag_passed(self):
         with (
             patch("sys.argv", ["wuzup", "--debug", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value=""),
+            patch("wuzup.cli._images_to_text_command", return_value=""),
             patch("wuzup.cli._debug_setup") as mock_debug,
         ):
             main()
@@ -455,7 +476,7 @@ class TestMain:
     def test_debug_all_flag_passed(self):
         with (
             patch("sys.argv", ["wuzup", "--debug-all", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value=""),
+            patch("wuzup.cli._images_to_text_command", return_value=""),
             patch("wuzup.cli._debug_setup") as mock_debug,
         ):
             main()
@@ -464,7 +485,7 @@ class TestMain:
     def test_both_debug_flags(self):
         with (
             patch("sys.argv", ["wuzup", "--debug", "--debug-all", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._image_to_text_command", return_value=""),
+            patch("wuzup.cli._images_to_text_command", return_value=""),
             patch("wuzup.cli._debug_setup") as mock_debug,
         ):
             main()
@@ -472,15 +493,15 @@ class TestMain:
 
     def test_explicit_args_parameter(self, capsys):
         """Passing args directly should bypass sys.argv."""
-        with patch("wuzup.cli._image_to_text_command", return_value="from args") as mock_cmd:
+        with patch("wuzup.cli._images_to_text_command", return_value="from args") as mock_cmd:
             main(["image-to-text", "--path", "/tmp/img.png"])
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selector=None)
+            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None)
         assert capsys.readouterr().out.strip() == "from args"
 
     def test_output_parameter(self):
         """Passing output should write there instead of stdout."""
         buf = StringIO()
-        with patch("wuzup.cli._image_to_text_command", return_value="to buffer"):
+        with patch("wuzup.cli._images_to_text_command", return_value="to buffer"):
             main(["image-to-text", "--path", "/tmp/img.png"], output=buf)
         assert buf.getvalue().strip() == "to buffer"
 
@@ -541,8 +562,10 @@ class TestVersion:
 
 @pytest.mark.integration
 class TestIntegration:
-    def test_load_image_from_real_url(self):
+    def test_load_images_from_real_url(self):
         """Fetch a real image from the web."""
         url = "https://httpbin.org/image/png"
-        img = load_image_from_url(url)
-        assert isinstance(img, Image.Image)
+        images = load_images_from_url(url)
+        assert isinstance(images, list)
+        assert len(images) == 1
+        assert isinstance(images[0], Image.Image)

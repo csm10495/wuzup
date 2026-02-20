@@ -44,48 +44,61 @@ def load_image_from_path(path: str) -> Image.Image:
     return Image.open(path)
 
 
-def load_image_from_url(url: str, selector: str | None = None) -> Image.Image:
-    """Fetch an image from a URL, optionally locating it via a CSS selector.
+def load_images_from_url(url: str, selectors: list[str] | None = None) -> list[Image.Image]:
+    """Fetch images from a URL, optionally locating them via CSS selectors.
 
-    When *selector* is ``None`` the *url* is treated as a direct link to an
-    image.  When a *selector* is provided the page at *url* is fetched first,
-    the matching ``<img>`` element is found, and its ``src`` (or ``data-src``)
-    attribute is followed to retrieve the actual image.
+    When *selectors* is ``None`` the *url* is treated as a direct link to an
+    image.  When *selectors* are provided the page at *url* is fetched first,
+    elements matching **any** of the selectors are found, and their ``src``
+    (or ``data-src``) attributes are followed to retrieve the actual images.
 
     Args:
         url: URL pointing either directly to an image or to an HTML page
             containing one.
-        selector: Optional CSS selector used to locate an ``<img>`` element
-            on the page.
+        selectors: Optional list of CSS selectors used to locate ``<img>``
+            elements on the page.  Images matching *any* selector are returned.
 
     Returns:
-        The fetched PIL Image.
+        A list of fetched PIL Images.
 
     Raises:
-        ValueError: If the selector matches no element, or the matched element
-            has no ``src`` / ``data-src`` attribute.
+        ValueError: If no selector matches any element, or if every matched
+            element lacks a ``src`` / ``data-src`` attribute.
         requests.HTTPError: If any HTTP request fails.
     """
-    if selector:
+    if selectors:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
-        element = soup.select_one(selector)
-        if element is None:
-            raise ValueError(f"No element found matching selector: {selector}")
 
-        img_url = element.get("src") or element.get("data-src")
-        if not img_url:
-            raise ValueError(f"Element matching selector '{selector}' has no src or data-src attribute")
+        img_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for selector in selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                img_url = element.get("src") or element.get("data-src")
+                if img_url:
+                    resolved = urljoin(url, img_url)
+                    if resolved not in seen_urls:
+                        seen_urls.add(resolved)
+                        img_urls.append(resolved)
+                        log.debug(f"Found image URL: {resolved}")
+                else:
+                    log.debug(f"Element matching selector '{selector}' has no src or data-src attribute, skipping")
 
-        img_url = urljoin(url, img_url)
-        log.debug(f"Found image URL: {img_url}")
+        if not img_urls:
+            raise ValueError(f"No images found matching any selector: {selectors}")
+
+        images: list[Image.Image] = []
+        for img_url in img_urls:
+            resp = requests.get(img_url, timeout=30)
+            resp.raise_for_status()
+            images.append(Image.open(BytesIO(resp.content)))
+        return images
     else:
-        img_url = url
-
-    response = requests.get(img_url, timeout=30)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content))
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return [Image.open(BytesIO(response.content))]
 
 
 def composite_on_color(image: Image.Image, color: tuple[int, int, int]) -> Image.Image:
