@@ -84,6 +84,13 @@ el.replaceWith(d);
         dest=&#34;selectors&#34;,
         help=&#34;CSS selector to find an image on the page (only with --url). Can be specified multiple times.&#34;,
     )
+    itt_parser.add_argument(
+        &#34;-T&#34;,
+        &#34;--timeout&#34;,
+        type=float,
+        default=30,
+        help=&#34;Timeout in seconds for HTTP requests (default: 30).&#34;,
+    )
 
     args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
@@ -91,7 +98,10 @@ el.replaceWith(d);
     if args.command in (&#34;image-to-text&#34;, &#34;i2t&#34;, &#34;itt&#34;):
         if args.selectors and not args.url:
             parser.error(&#34;--selector can only be used with --url&#34;)
-        print(_images_to_text_command(path=args.path, url=args.url, selectors=args.selectors), file=output)</code></pre>
+        print(
+            _images_to_text_command(path=args.path, url=args.url, selectors=args.selectors, timeout=args.timeout),
+            file=output,
+        )</code></pre>
 </details>
 <div class="desc"><p>Entry point for the <code><a title="wuzup" href="index.html">wuzup</a></code> CLI.</p>
 <h2 id="args">Args</h2>

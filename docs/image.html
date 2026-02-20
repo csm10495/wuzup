@@ -192,14 +192,14 @@ lines (compared case-insensitively) are collected in order.</p>
 </dl></div>
 </dd>
 <dt id="wuzup.image.load_images_from_url"><code class="name flex">
-<span>def <span class="ident">load_images_from_url</span></span>(<span>url: str, selectors: list[str] | None = None) ‑> list[PIL.Image.Image]</span>
+<span>def <span class="ident">load_images_from_url</span></span>(<span>url: str, selectors: list[str] | None = None, timeout: float = 30) ‑> list[PIL.Image.Image]</span>
 </code></dt>
 <dd>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def load_images_from_url(url: str, selectors: list[str] | None = None) -&gt; list[Image.Image]:
+<pre><code class="python">def load_images_from_url(url: str, selectors: list[str] | None = None, timeout: float = 30) -&gt; list[Image.Image]:
     &#34;&#34;&#34;Fetch images from a URL, optionally locating them via CSS selectors.
 
     When *selectors* is ``None`` the *url* is treated as a direct link to an
@@ -212,6 +212,7 @@ lines (compared case-insensitively) are collected in order.</p>
             containing one.
         selectors: Optional list of CSS selectors used to locate ``&lt;img&gt;``
             elements on the page.  Images matching *any* selector are returned.
+        timeout: Timeout in seconds for each HTTP request.
 
     Returns:
         A list of fetched PIL Images.
@@ -222,7 +223,7 @@ lines (compared case-insensitively) are collected in order.</p>
         requests.HTTPError: If any HTTP request fails.
     &#34;&#34;&#34;
     if selectors:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, &#34;html.parser&#34;)
 
@@ -246,12 +247,12 @@ lines (compared case-insensitively) are collected in order.</p>
 
         images: list[Image.Image] = []
         for img_url in img_urls:
-            resp = requests.get(img_url, timeout=30)
+            resp = requests.get(img_url, timeout=timeout)
             resp.raise_for_status()
             images.append(Image.open(BytesIO(resp.content)))
         return images
     else:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         return [Image.open(BytesIO(response.content))]</code></pre>
 </details>
@@ -270,6 +271,8 @@ containing one.</dd>
 <dd>Optional list of CSS selectors used to locate <code>&lt;img&gt;</code>
 elements on the page.
 Images matching <em>any</em> selector are returned.</dd>
+<dt><strong><code>timeout</code></strong></dt>
+<dd>Timeout in seconds for each HTTP request.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <p>A list of fetched PIL Images.</p>
