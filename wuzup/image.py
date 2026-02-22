@@ -4,13 +4,9 @@ import logging
 import os
 import shutil
 import sys
-from io import BytesIO
 from pathlib import Path
-from urllib.parse import urljoin
 
 import pytesseract
-import requests
-from bs4 import BeautifulSoup
 from PIL import Image
 
 # When bundled via PyInstaller, Tesseract is included in the _MEIPASS directory.
@@ -41,65 +37,10 @@ def load_image_from_path(path: str) -> Image.Image:
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    return Image.open(path)
-
-
-def load_images_from_url(url: str, selectors: list[str] | None = None, timeout: float = 30) -> list[Image.Image]:
-    """Fetch images from a URL, optionally locating them via CSS selectors.
-
-    When *selectors* is ``None`` the *url* is treated as a direct link to an
-    image.  When *selectors* are provided the page at *url* is fetched first,
-    elements matching **any** of the selectors are found, and their ``src``
-    (or ``data-src``) attributes are followed to retrieve the actual images.
-
-    Args:
-        url: URL pointing either directly to an image or to an HTML page
-            containing one.
-        selectors: Optional list of CSS selectors used to locate ``<img>``
-            elements on the page.  Images matching *any* selector are returned.
-        timeout: Timeout in seconds for each HTTP request.
-
-    Returns:
-        A list of fetched PIL Images.
-
-    Raises:
-        ValueError: If no selector matches any element, or if every matched
-            element lacks a ``src`` / ``data-src`` attribute.
-        requests.HTTPError: If any HTTP request fails.
-    """
-    if selectors:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        img_urls: list[str] = []
-        seen_urls: set[str] = set()
-        for selector in selectors:
-            elements = soup.select(selector)
-            for element in elements:
-                img_url = element.get("src") or element.get("data-src")
-                if img_url:
-                    resolved = urljoin(url, img_url)
-                    if resolved not in seen_urls:
-                        seen_urls.add(resolved)
-                        img_urls.append(resolved)
-                        log.debug(f"Found image URL: {resolved}")
-                else:
-                    log.debug(f"Element matching selector '{selector}' has no src or data-src attribute, skipping")
-
-        if not img_urls:
-            raise ValueError(f"No images found matching any selector: {selectors}")
-
-        images: list[Image.Image] = []
-        for img_url in img_urls:
-            resp = requests.get(img_url, timeout=timeout)
-            resp.raise_for_status()
-            images.append(Image.open(BytesIO(resp.content)))
-        return images
-    else:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        return [Image.open(BytesIO(response.content))]
+    log.debug(f"Loading image from {path}")
+    img = Image.open(path)
+    log.debug(f"Loaded image: {img.size[0]}x{img.size[1]} {img.mode}")
+    return img
 
 
 def composite_on_color(image: Image.Image, color: tuple[int, int, int]) -> Image.Image:
@@ -162,6 +103,7 @@ def image_to_text(image: Image.Image) -> str:
     b_ch = on_white.getchannel("B")
 
     variants = [on_white, on_black, r_ch, g_ch, b_ch]
+    log.debug(f"Running OCR on {len(variants)} variant(s) of {image.size[0]}x{image.size[1]} image")
 
     # Collect unique lines across all variants
     seen: set[str] = set()
@@ -178,4 +120,5 @@ def image_to_text(image: Image.Image) -> str:
                 seen.add(key)
                 all_lines.append(line)
 
+    log.debug(f"OCR extracted {len(all_lines)} unique line(s) from image")
     return "\n".join(all_lines)

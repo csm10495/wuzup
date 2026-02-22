@@ -14,10 +14,12 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "beautifulsoup4",
+    "cairosvg",
     "pytesseract",
     "Pillow",
+    "playwright",
     "requests",
-    "beautifulsoup4",
 ]
 
 [project.optional-dependencies]

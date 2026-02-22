@@ -1,6 +1,7 @@
-"""Comprehensive unit tests for wuzup."""
+"""Comprehensive unit and integration tests for wuzup."""
 
 import logging
+import os
 import subprocess
 import sys
 from io import BytesIO, StringIO
@@ -9,18 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
-from wuzup.cli import (
-    _debug_setup,
-    _images_to_text_command,
-    main,
-)
-from wuzup.image import (
-    composite_on_color,
-    image_to_text,
-    load_image_from_path,
-    load_images_from_url,
-    ocr_variant,
-)
+from wuzup.cli import _debug_setup, _make_fetcher, _web_to_text_command, main
+from wuzup.fetcher import Fetcher, ScrapeResult
+from wuzup.image import composite_on_color, image_to_text, load_image_from_path, ocr_variant
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,582 +35,886 @@ def _image_to_bytes(img: Image.Image, fmt: str = "PNG") -> bytes:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
-# _debug_setup
-# ---------------------------------------------------------------------------
+def _mock_page_cm(mock_page):
+    """Create a mock context manager that yields *mock_page*."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        yield mock_page
+
+    return _cm
 
 
-class TestDebugSetup:
-    def test_no_flags(self):
-        """No flags should leave log levels unchanged."""
-        with patch.object(logging.getLogger("wuzup"), "setLevel") as mock_set:
-            _debug_setup(False, False)
-            mock_set.assert_not_called()
-
-    def test_debug_flag(self):
-        """--debug should set wuzup logger to DEBUG."""
-        _debug_setup(True, False)
-        assert logging.getLogger("wuzup").level == logging.DEBUG
-        # Reset
-        logging.getLogger("wuzup").setLevel(logging.INFO)
-
-    def test_debug_all_flag(self):
-        """--debug-all should set the root logger to DEBUG."""
-        original = logging.getLogger().level
-        _debug_setup(False, True)
-        assert logging.getLogger().level == logging.DEBUG
-        # Reset
-        logging.getLogger().setLevel(original)
-
-    def test_both_flags(self):
-        """Both flags together should set both loggers."""
-        original_root = logging.getLogger().level
-        _debug_setup(True, True)
-        assert logging.getLogger("wuzup").level == logging.DEBUG
-        assert logging.getLogger().level == logging.DEBUG
-        # Reset
-        logging.getLogger("wuzup").setLevel(logging.INFO)
-        logging.getLogger().setLevel(original_root)
+# ===========================================================================
+# fetcher.py — ScrapeResult
+# ===========================================================================
 
 
-# ---------------------------------------------------------------------------
-# _load_image_from_path
-# ---------------------------------------------------------------------------
+class TestScrapeResult:
+    def test_defaults(self):
+        result = ScrapeResult()
+        assert result.img_urls == []
+        assert result.element_text == ""
+
+    def test_custom_values(self):
+        result = ScrapeResult(img_urls=["http://a.png"], element_text="hello")
+        assert result.img_urls == ["http://a.png"]
+        assert result.element_text == "hello"
+
+    def test_independent_instances(self):
+        """Each instance gets its own list."""
+        r1 = ScrapeResult()
+        r2 = ScrapeResult()
+        r1.img_urls.append("x")
+        assert r2.img_urls == []
+
+
+# ===========================================================================
+# fetcher.py — Fetcher (abstract base, concrete helpers)
+# ===========================================================================
+
+
+class _ConcreteFetcher(Fetcher):
+    """Minimal concrete subclass for testing base methods."""
+
+    def scrape(self, url, selectors):
+        return ScrapeResult()
+
+
+class TestFetcher:
+    def test_cannot_instantiate_abc(self):
+        with pytest.raises(TypeError):
+            Fetcher()
+
+    def test_timeout_default(self):
+        f = _ConcreteFetcher()
+        assert f.timeout == 30
+
+    def test_timeout_custom(self):
+        f = _ConcreteFetcher(timeout=10)
+        assert f.timeout == 10
+
+    @patch("wuzup.fetcher.requests.get")
+    def test_fetch_image(self, mock_get):
+        img = _make_rgb_image()
+        mock_resp = MagicMock()
+        mock_resp.content = _image_to_bytes(img)
+        mock_get.return_value = mock_resp
+
+        f = _ConcreteFetcher(timeout=5)
+        result = f.fetch_image("http://example.com/img.png")
+
+        mock_get.assert_called_once_with("http://example.com/img.png", timeout=5)
+        mock_resp.raise_for_status.assert_called_once()
+        assert isinstance(result, Image.Image)
+
+    @patch("wuzup.fetcher.requests.get")
+    def test_fetch_images_skips_failures(self, mock_get):
+        """If one URL fails, the other images are still returned."""
+        good_img = _make_rgb_image()
+        good_resp = MagicMock()
+        good_resp.content = _image_to_bytes(good_img)
+
+        def side_effect(url, **kw):
+            if "bad" in url:
+                raise ConnectionError("boom")
+            return good_resp
+
+        mock_get.side_effect = side_effect
+
+        f = _ConcreteFetcher()
+        imgs = f.fetch_images(["http://bad.com/x.png", "http://good.com/y.png"])
+
+        assert len(imgs) == 1
+        assert isinstance(imgs[0], Image.Image)
+
+    @patch("wuzup.fetcher.requests.get")
+    def test_fetch_images_empty_list(self, mock_get):
+        f = _ConcreteFetcher()
+        assert f.fetch_images([]) == []
+        mock_get.assert_not_called()
+
+
+# ===========================================================================
+# requests_fetcher.py — RequestsFetcher
+# ===========================================================================
+
+
+class TestRequestsFetcher:
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_finds_src(self, mock_get):
+        """img tags with src are collected."""
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = '<html><body><img class="t" src="/a.png"></body></html>'
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".t"])
+
+        assert result.img_urls == ["http://example.com/a.png"]
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_finds_data_src(self, mock_get):
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = '<html><body><div class="t" data-src="/lazy.jpg"></div></body></html>'
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".t"])
+        assert result.img_urls == ["http://example.com/lazy.jpg"]
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_nested_img(self, mock_get):
+        """img nested inside a matching div is found."""
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = '<html><body><div class="wrap"><img src="/nested.png"></div></body></html>'
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".wrap"])
+        assert "http://example.com/nested.png" in result.img_urls
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_deduplication(self, mock_get):
+        """Same image URL appearing twice is deduplicated."""
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = '<html><body><img class="t" src="/a.png"><img class="t" src="/a.png"></body></html>'
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".t"])
+        assert result.img_urls == ["http://example.com/a.png"]
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_text_extraction(self, mock_get):
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = '<html><body><p class="t">Hello World</p></body></html>'
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".t"])
+        assert result.element_text == "Hello World"
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_multiple_selectors(self, mock_get):
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = (
+            '<html><body><img class="a" src="/1.png"><div class="b"><img src="/2.png"><p>text</p></div></body></html>'
+        )
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".a", ".b"])
+        assert len(result.img_urls) == 2
+        assert "text" in result.element_text
+
+    @patch("wuzup.requests_fetcher.requests.get")
+    def test_scrape_no_match(self, mock_get):
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        html = "<html><body><p>nothing</p></body></html>"
+        mock_get.return_value = MagicMock(text=html)
+
+        f = RequestsFetcher()
+        result = f.scrape("http://example.com", [".missing"])
+        assert result.img_urls == []
+        assert result.element_text == ""
+
+
+# ===========================================================================
+# playwright_fetcher.py — _get_page / PlaywrightFetcher
+# ===========================================================================
+
+
+class TestGetPage:
+    @patch("wuzup.playwright_fetcher.sync_playwright")
+    def test_yields_page_and_closes(self, mock_sp):
+        from wuzup.playwright_fetcher import _get_page
+
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_browser.new_page.return_value = mock_page
+        mock_pw = MagicMock()
+        mock_pw.chromium.launch.return_value = mock_browser
+        mock_sp.return_value.__enter__ = MagicMock(return_value=mock_pw)
+        mock_sp.return_value.__exit__ = MagicMock(return_value=False)
+
+        with _get_page() as page:
+            assert page is mock_page
+
+        mock_browser.close.assert_called_once()
+
+    @patch.dict(os.environ, {"ALL_PROXY": "http://proxy:8080"}, clear=False)
+    @patch("wuzup.playwright_fetcher.sync_playwright")
+    def test_uses_proxy_from_env(self, mock_sp):
+        from wuzup.playwright_fetcher import _get_page
+
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_browser.new_page.return_value = mock_page
+        mock_pw = MagicMock()
+        mock_pw.chromium.launch.return_value = mock_browser
+        mock_sp.return_value.__enter__ = MagicMock(return_value=mock_pw)
+        mock_sp.return_value.__exit__ = MagicMock(return_value=False)
+
+        with _get_page() as _page:
+            pass
+
+        launch_kwargs = mock_pw.chromium.launch.call_args
+        assert launch_kwargs[1].get("proxy") == {"server": "http://proxy:8080"}
+
+    @patch("wuzup.playwright_fetcher.sync_playwright")
+    def test_closes_browser_on_error(self, mock_sp):
+        from wuzup.playwright_fetcher import _get_page
+
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_browser.new_page.return_value = mock_page
+        mock_pw = MagicMock()
+        mock_pw.chromium.launch.return_value = mock_browser
+        mock_sp.return_value.__enter__ = MagicMock(return_value=mock_pw)
+        mock_sp.return_value.__exit__ = MagicMock(return_value=False)
+
+        with pytest.raises(RuntimeError):
+            with _get_page() as _page:
+                raise RuntimeError("test")
+
+        mock_browser.close.assert_called_once()
+
+
+class TestPlaywrightFetcher:
+    def _make_fetcher_and_page(self):
+        from wuzup.playwright_fetcher import PlaywrightFetcher
+
+        mock_page = MagicMock()
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.status = 200
+        mock_page.goto.return_value = mock_response
+
+        fetcher = PlaywrightFetcher(timeout=10, page_wait_for_timeout=0)
+        return fetcher, mock_page
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_collects_src(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        elem = MagicMock()
+        elem.get_attribute.side_effect = lambda a: "/img.png" if a == "src" else None
+        elem.query_selector_all.return_value = []
+        elem.inner_text.return_value = ""
+        mock_page.query_selector_all.return_value = [elem]
+
+        result = fetcher.scrape("http://example.com", [".sel"])
+        assert result.img_urls == ["http://example.com/img.png"]
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_nested_img(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        container = MagicMock()
+        container.get_attribute.return_value = None
+        container.inner_text.return_value = "some text"
+
+        nested = MagicMock()
+        nested.get_attribute.side_effect = lambda a: "/nested.png" if a == "src" else None
+        container.query_selector_all.return_value = [nested]
+
+        mock_page.query_selector_all.return_value = [container]
+
+        result = fetcher.scrape("http://example.com", [".wrap"])
+        assert "http://example.com/nested.png" in result.img_urls
+        assert result.element_text == "some text"
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_text_extraction(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        elem = MagicMock()
+        elem.get_attribute.return_value = None
+        elem.query_selector_all.return_value = []
+        elem.inner_text.return_value = "Hello World"
+        mock_page.query_selector_all.return_value = [elem]
+
+        result = fetcher.scrape("http://example.com", [".sel"])
+        assert result.element_text == "Hello World"
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_deduplication(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        elem1 = MagicMock()
+        elem1.get_attribute.side_effect = lambda a: "/same.png" if a == "src" else None
+        elem1.query_selector_all.return_value = []
+        elem1.inner_text.return_value = ""
+
+        elem2 = MagicMock()
+        elem2.get_attribute.side_effect = lambda a: "/same.png" if a == "src" else None
+        elem2.query_selector_all.return_value = []
+        elem2.inner_text.return_value = ""
+
+        mock_page.query_selector_all.return_value = [elem1, elem2]
+
+        result = fetcher.scrape("http://example.com", [".sel"])
+        assert result.img_urls == ["http://example.com/same.png"]
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_http_error_raises(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        mock_resp = mock_page.goto.return_value
+        mock_resp.ok = False
+        mock_resp.status = 404
+        mock_resp.status_text = "Not Found"
+
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            fetcher.scrape("http://example.com/bad", [".sel"])
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_page_wait_for_timeout(self, mock_gp):
+        from wuzup.playwright_fetcher import PlaywrightFetcher
+
+        mock_page = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        mock_page.goto.return_value = mock_resp
+        mock_page.query_selector_all.return_value = []
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+
+        fetcher = PlaywrightFetcher(timeout=10, page_wait_for_timeout=2)
+        fetcher.scrape("http://example.com", [".sel"])
+
+        mock_page.wait_for_timeout.assert_called_once_with(2000)
+
+    @patch("wuzup.playwright_fetcher._get_page")
+    def test_scrape_no_wait_when_zero(self, mock_gp):
+        fetcher, mock_page = self._make_fetcher_and_page()
+        mock_gp.return_value = _mock_page_cm(mock_page)()
+        mock_page.query_selector_all.return_value = []
+
+        fetcher.scrape("http://example.com", [".sel"])
+        mock_page.wait_for_timeout.assert_not_called()
+
+
+# ===========================================================================
+# image.py — load_image_from_path
+# ===========================================================================
 
 
 class TestLoadImageFromPath:
-    def test_loads_image(self, tmp_path):
-        """Should open a local image file and return a PIL Image."""
-        img = _make_rgb_image()
-        path = tmp_path / "test.png"
-        img.save(path)
-        result = load_image_from_path(str(path))
-        assert isinstance(result, Image.Image)
-        assert result.size == (10, 10)
+    def test_load_valid_image(self, tmp_path):
+        p = tmp_path / "test.png"
+        _make_rgb_image().save(str(p))
+        img = load_image_from_path(str(p))
+        assert isinstance(img, Image.Image)
+        assert img.size == (10, 10)
 
-    def test_missing_file_raises(self):
+    def test_load_missing_file(self):
         with pytest.raises(FileNotFoundError):
-            load_image_from_path("/nonexistent/path.png")
+            load_image_from_path("/nonexistent/image.png")
 
 
-# ---------------------------------------------------------------------------
-# _load_images_from_url
-# ---------------------------------------------------------------------------
-
-
-class TestLoadImagesFromUrl:
-    def test_direct_url(self):
-        """Without selectors, should fetch the URL directly as an image."""
-        img_bytes = _image_to_bytes(_make_rgb_image())
-        mock_resp = MagicMock()
-        mock_resp.content = img_bytes
-        mock_resp.raise_for_status = MagicMock()
-
-        def fake_get(url, **kwargs):
-            assert url == "http://example.com/img.png"
-            assert kwargs == {"timeout": 30}
-            return mock_resp
-
-        with patch("wuzup.image.requests.get", side_effect=fake_get):
-            result = load_images_from_url("http://example.com/img.png")
-            assert isinstance(result, list)
-            assert len(result) == 1
-            assert isinstance(result[0], Image.Image)
-
-    def test_with_selector_finds_src(self):
-        """With a selector, should parse HTML page and follow src attribute."""
-        html = '<html><body><img id="target" src="/images/photo.png"></body></html>'
-        img_bytes = _image_to_bytes(_make_rgb_image())
-
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        img_resp = MagicMock()
-        img_resp.content = img_bytes
-        img_resp.raise_for_status = MagicMock()
-
-        responses = iter([page_resp, img_resp])
-
-        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)) as mock_get:
-            result = load_images_from_url("http://example.com/page", selectors=["#target"])
-            assert mock_get.call_count == 2
-            # Second call should resolve relative URL
-            mock_get.assert_called_with("http://example.com/images/photo.png", timeout=30)
-            assert isinstance(result, list)
-            assert len(result) == 1
-            assert isinstance(result[0], Image.Image)
-
-    def test_with_selector_finds_data_src(self):
-        """Should fall back to data-src when src is absent."""
-        html = '<html><body><img class="lazy" data-src="https://cdn.example.com/pic.jpg"></body></html>'
-        img_bytes = _image_to_bytes(_make_rgb_image())
-
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        img_resp = MagicMock()
-        img_resp.content = img_bytes
-        img_resp.raise_for_status = MagicMock()
-
-        responses = iter([page_resp, img_resp])
-
-        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)):
-            result = load_images_from_url("http://example.com/page", selectors=[".lazy"])
-            assert isinstance(result, list)
-            assert len(result) == 1
-            assert isinstance(result[0], Image.Image)
-
-    def test_with_selector_no_match_raises(self):
-        """Should raise ValueError when selector matches no element."""
-        html = "<html><body><p>No images here</p></body></html>"
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        with patch("wuzup.image.requests.get", return_value=page_resp):
-            with pytest.raises(ValueError, match="No images found matching any selector"):
-                load_images_from_url("http://example.com/page", selectors=["#missing"])
-
-    def test_with_selector_element_no_src_skipped(self):
-        """Element with no src/data-src should be skipped; raises if no images found."""
-        html = '<html><body><div id="nosrc">hello</div></body></html>'
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        with patch("wuzup.image.requests.get", return_value=page_resp):
-            with pytest.raises(ValueError, match="No images found matching any selector"):
-                load_images_from_url("http://example.com/page", selectors=["#nosrc"])
-
-    def test_relative_url_joined(self):
-        """Relative src should be resolved against the base page URL."""
-        html = '<html><body><img id="img" src="relative/pic.png"></body></html>'
-        img_bytes = _image_to_bytes(_make_rgb_image())
-
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        img_resp = MagicMock()
-        img_resp.content = img_bytes
-        img_resp.raise_for_status = MagicMock()
-
-        responses = iter([page_resp, img_resp])
-        calls = []
-
-        def fake_get(url, **kw):
-            calls.append(url)
-            return next(responses)
-
-        with patch("wuzup.image.requests.get", side_effect=fake_get):
-            load_images_from_url("http://example.com/dir/page", selectors=["#img"])
-            assert calls[-1] == "http://example.com/dir/relative/pic.png"
-
-    def test_http_error_propagated(self):
-        """requests exceptions should propagate."""
-        import requests
-
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError("404")
-
-        with patch("wuzup.image.requests.get", return_value=mock_resp):
-            with pytest.raises(requests.HTTPError):
-                load_images_from_url("http://example.com/bad.png")
-
-    def test_custom_timeout_direct_url(self):
-        """Custom timeout should be forwarded to requests.get for direct URL."""
-        img_bytes = _image_to_bytes(_make_rgb_image())
-        mock_resp = MagicMock()
-        mock_resp.content = img_bytes
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("wuzup.image.requests.get", return_value=mock_resp) as mock_get:
-            load_images_from_url("http://example.com/img.png", timeout=5)
-            mock_get.assert_called_once_with("http://example.com/img.png", timeout=5)
-
-    def test_custom_timeout_with_selectors(self):
-        """Custom timeout should be forwarded to all requests.get calls when using selectors."""
-        html = '<html><body><img id="target" src="/images/photo.png"></body></html>'
-        img_bytes = _image_to_bytes(_make_rgb_image())
-
-        page_resp = MagicMock()
-        page_resp.text = html
-        page_resp.raise_for_status = MagicMock()
-
-        img_resp = MagicMock()
-        img_resp.content = img_bytes
-        img_resp.raise_for_status = MagicMock()
-
-        responses = iter([page_resp, img_resp])
-
-        with patch("wuzup.image.requests.get", side_effect=lambda url, **kw: next(responses)) as mock_get:
-            load_images_from_url("http://example.com/page", selectors=["#target"], timeout=10)
-            # Both the page fetch and image fetch should use the custom timeout
-            assert mock_get.call_count == 2
-            for call in mock_get.call_args_list:
-                assert call.kwargs["timeout"] == 10
-
-
-# ---------------------------------------------------------------------------
-# _composite_on_color
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# image.py — composite_on_color
+# ===========================================================================
 
 
 class TestCompositeOnColor:
-    def test_rgba_composited(self):
-        """RGBA image should be composited onto the given color."""
-        img = _make_rgba_image(size=(4, 4), color=(0, 0, 0, 0))  # fully transparent
-        result = composite_on_color(img, (255, 0, 0))
+    def test_rgba_on_white(self):
+        img = _make_rgba_image(color=(255, 0, 0, 128))
+        result = composite_on_color(img, (255, 255, 255))
         assert result.mode == "RGB"
-        # Fully transparent over red background -> red
-        assert result.getpixel((0, 0)) == (255, 0, 0)
+        assert result.size == img.size
 
-    def test_rgb_converted_to_rgba(self):
-        """RGB input should be converted to RGBA first."""
-        img = _make_rgb_image(size=(4, 4), color=(0, 255, 0))
-        result = composite_on_color(img, (0, 0, 255))
-        assert result.mode == "RGB"
-        # Opaque green composited on blue -> green
-        assert result.getpixel((0, 0)) == (0, 255, 0)
-
-    def test_opaque_pixel_preserved(self):
-        """Fully opaque pixels should show through unchanged."""
-        img = _make_rgba_image(size=(2, 2), color=(42, 100, 200, 255))
+    def test_rgb_converted_to_rgba_then_composited(self):
+        img = _make_rgb_image(color=(0, 255, 0))
         result = composite_on_color(img, (0, 0, 0))
-        assert result.getpixel((0, 0)) == (42, 100, 200)
+        assert result.mode == "RGB"
 
-    def test_output_size_matches_input(self):
-        img = _make_rgba_image(size=(7, 13))
-        result = composite_on_color(img, (128, 128, 128))
-        assert result.size == (7, 13)
+    def test_transparent_shows_bg(self):
+        img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        result = composite_on_color(img, (123, 45, 67))
+        assert result.getpixel((0, 0)) == (123, 45, 67)
+
+    def test_opaque_hides_bg(self):
+        img = Image.new("RGBA", (1, 1), (200, 100, 50, 255))
+        result = composite_on_color(img, (0, 0, 0))
+        assert result.getpixel((0, 0)) == (200, 100, 50)
 
 
-# ---------------------------------------------------------------------------
-# _ocr_variant
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# image.py — ocr_variant
+# ===========================================================================
 
 
 class TestOcrVariant:
-    def test_calls_pytesseract(self):
-        """Should delegate to pytesseract and strip the result."""
-        img = _make_rgb_image()
-        with patch("wuzup.image.pytesseract.image_to_string", return_value="  Hello World  \n") as mock_ocr:
-            result = ocr_variant(img)
-            mock_ocr.assert_called_once_with(img)
-            assert result == "Hello World"
+    @patch("wuzup.image.pytesseract.image_to_string", return_value="  hello world  ")
+    def test_strips_whitespace(self, mock_ocr):
+        result = ocr_variant(_make_rgb_image())
+        assert result == "hello world"
+        mock_ocr.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# _image_to_text
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# image.py — image_to_text
+# ===========================================================================
 
 
 class TestImageToText:
-    def test_deduplicates_lines(self):
-        """Lines appearing in multiple variants should appear only once."""
-        img = _make_rgba_image()
+    @patch("wuzup.image.ocr_variant")
+    def test_deduplicates_case_insensitively(self, mock_ocr):
+        mock_ocr.side_effect = ["Hello\nWorld", "hello\nworld", "HELLO", "World\nNew", "new"]
+        result = image_to_text(_make_rgba_image())
+        lines = result.splitlines()
+        assert "Hello" in lines
+        assert "World" in lines
+        assert "New" in lines
+        # Only unique lines (case-insensitive)
+        lower_lines = [line.lower() for line in lines]
+        assert len(lower_lines) == len(set(lower_lines))
 
-        with patch("wuzup.image.ocr_variant", return_value="Hello\nWorld"):
-            result = image_to_text(img)
-            assert result == "Hello\nWorld"
+    @patch("wuzup.image.ocr_variant", return_value="")
+    def test_empty_ocr(self, mock_ocr):
+        result = image_to_text(_make_rgba_image())
+        assert result == ""
 
-    def test_deduplication_is_case_insensitive(self):
-        """Dedup key uses lowercase, but original casing is preserved."""
-        img = _make_rgba_image()
-
-        side_effects = [
-            "HELLO",
-            "hello",
-            "Hello",
-            "",
-            "",
-        ]
-
-        with patch("wuzup.image.ocr_variant", side_effect=side_effects):
-            result = image_to_text(img)
-            assert result == "HELLO"  # first occurrence wins
-
-    def test_empty_lines_skipped(self):
-        """Blank lines from OCR should be filtered out."""
-        img = _make_rgba_image()
-
-        with patch("wuzup.image.ocr_variant", return_value="\n\n   \n"):
-            result = image_to_text(img)
-            assert result == ""
-
-    def test_five_variants_processed(self):
-        """Should create 5 variants: white bg, black bg, R, G, B channels."""
-        img = _make_rgba_image()
-
-        with patch("wuzup.image.ocr_variant", return_value="") as mock_ocr:
-            image_to_text(img)
-            assert mock_ocr.call_count == 5
-
-    def test_collects_unique_lines_across_variants(self):
-        """Lines from different variants should be merged."""
-        img = _make_rgba_image()
-
-        side_effects = [
-            "line from white",
-            "line from black",
-            "line from R",
-            "line from G",
-            "line from B",
-        ]
-
-        with patch("wuzup.image.ocr_variant", side_effect=side_effects):
-            result = image_to_text(img)
-            lines = result.splitlines()
-            assert lines == [
-                "line from white",
-                "line from black",
-                "line from R",
-                "line from G",
-                "line from B",
-            ]
+    @patch("wuzup.image.ocr_variant")
+    def test_five_variants_called(self, mock_ocr):
+        mock_ocr.return_value = ""
+        image_to_text(_make_rgba_image())
+        assert mock_ocr.call_count == 5
 
 
-# ---------------------------------------------------------------------------
-# _images_to_text_command
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# cli.py — _debug_setup
+# ===========================================================================
 
 
-class TestImageToTextCommand:
-    def test_path_mode(self):
-        """When path is given, should load from path and return OCR result."""
-        mock_img = _make_rgb_image()
-        with (
-            patch("wuzup.cli.load_image_from_path", return_value=mock_img) as mock_load,
-            patch("wuzup.cli.image_to_text", return_value="OCR result") as mock_ocr,
+class TestDebugSetup:
+    def test_debug_sets_wuzup_to_debug(self):
+        logger = logging.getLogger("wuzup")
+        old = logger.level
+        try:
+            _debug_setup(debug=True, debug_all=False)
+            assert logger.level == logging.DEBUG
+        finally:
+            logger.setLevel(old)
+
+    def test_debug_all_sets_root_to_debug(self):
+        root = logging.getLogger()
+        old = root.level
+        try:
+            _debug_setup(debug=False, debug_all=True)
+            assert root.level == logging.DEBUG
+        finally:
+            root.setLevel(old)
+
+    def test_no_debug(self):
+        logger = logging.getLogger("wuzup")
+        logger.setLevel(logging.INFO)
+        _debug_setup(debug=False, debug_all=False)
+        assert logger.level == logging.INFO
+
+
+# ===========================================================================
+# cli.py — _make_fetcher
+# ===========================================================================
+
+
+class TestMakeFetcher:
+    def test_returns_requests_fetcher(self):
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        f = _make_fetcher(use_playwright=False)
+        assert isinstance(f, RequestsFetcher)
+        assert f.timeout == 30
+
+    def test_returns_playwright_fetcher(self):
+        from wuzup.playwright_fetcher import PlaywrightFetcher
+
+        f = _make_fetcher(use_playwright=True, timeout=15, page_wait_for_timeout=3)
+        assert isinstance(f, PlaywrightFetcher)
+        assert f.timeout == 15
+        assert f.page_wait_for_timeout == 3
+
+    def test_page_wait_without_playwright_raises(self):
+        with pytest.raises(
+            ValueError, match="--page-wait-for-timeout requires --playwright or --fallback-to-playwright"
         ):
-            result = _images_to_text_command(path="/some/img.png")
-            mock_load.assert_called_once_with("/some/img.png")
-            mock_ocr.assert_called_once_with(mock_img)
-        assert result == "OCR result"
+            _make_fetcher(use_playwright=False, page_wait_for_timeout=5)
 
-    def test_url_mode(self):
-        """When url is given, should load from URL and return OCR result."""
-        mock_img = _make_rgb_image()
-        with (
-            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
-            patch("wuzup.cli.image_to_text", return_value="URL text") as mock_ocr,
+    def test_custom_timeout_requests(self):
+        f = _make_fetcher(use_playwright=False, timeout=99)
+        assert f.timeout == 99
+
+
+# ===========================================================================
+# cli.py — _web_to_text_command
+# ===========================================================================
+
+
+class TestWebToTextCommand:
+    @patch("wuzup.cli.image_to_text", return_value="ocr text")
+    @patch("wuzup.cli._make_fetcher")
+    def test_direct_url_no_selectors(self, mock_mf, mock_i2t):
+        """When no selectors are given, fetch_image is called directly."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch_image.return_value = _make_rgb_image()
+        mock_mf.return_value = mock_fetcher
+
+        result = _web_to_text_command("http://example.com/pic.png")
+        mock_fetcher.fetch_image.assert_called_once_with("http://example.com/pic.png")
+        assert result == "ocr text"
+
+    @patch("wuzup.cli.image_to_text", return_value="img text")
+    @patch("wuzup.cli._make_fetcher")
+    def test_selectors_with_images(self, mock_mf, mock_i2t):
+        """When selectors find images, OCR the images."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.scrape.return_value = ScrapeResult(img_urls=["http://example.com/img.png"])
+        mock_fetcher.fetch_images.return_value = [_make_rgb_image()]
+        mock_mf.return_value = mock_fetcher
+
+        result = _web_to_text_command("http://example.com", selectors=[".sel"])
+        mock_fetcher.scrape.assert_called_once_with("http://example.com", [".sel"])
+        assert result == "img text"
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_selectors_text_only(self, mock_mf):
+        """When selectors find no images, return element text."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="fallback text")
+        mock_fetcher.fetch_images.return_value = []
+        mock_mf.return_value = mock_fetcher
+
+        result = _web_to_text_command("http://example.com", selectors=[".sel"])
+        assert result == "fallback text"
+
+    @patch("wuzup.cli.image_to_text", return_value="ocr line")
+    @patch("wuzup.cli._make_fetcher")
+    def test_selectors_images_and_text_combined(self, mock_mf, mock_i2t):
+        """When selectors find both images and text, combine them."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.scrape.return_value = ScrapeResult(
+            img_urls=["http://example.com/img.png"], element_text="element text"
+        )
+        mock_fetcher.fetch_images.return_value = [_make_rgb_image()]
+        mock_mf.return_value = mock_fetcher
+
+        result = _web_to_text_command("http://example.com", selectors=[".sel"])
+        assert "ocr line" in result
+        assert "element text" in result
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_selectors_no_images_no_text_raises(self, mock_mf):
+        """ValueError when neither images nor text are found."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        mock_fetcher.fetch_images.return_value = []
+        mock_mf.return_value = mock_fetcher
+
+        with pytest.raises(ValueError, match="No images or text found"):
+            _web_to_text_command("http://example.com", selectors=[".sel"])
+
+    @patch("wuzup.cli.image_to_text")
+    @patch("wuzup.cli._make_fetcher")
+    def test_multiple_images_deduplicated(self, mock_mf, mock_i2t):
+        """Lines from multiple images are deduplicated case-insensitively."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.scrape.return_value = ScrapeResult(img_urls=["u1", "u2"])
+        mock_fetcher.fetch_images.return_value = [_make_rgb_image(), _make_rgb_image()]
+        mock_mf.return_value = mock_fetcher
+
+        mock_i2t.side_effect = ["Line A\nLine B", "line a\nLine C"]
+
+        result = _web_to_text_command("http://example.com", selectors=[".s"])
+        lines = result.splitlines()
+        assert "Line A" in lines
+        assert "Line B" in lines
+        assert "Line C" in lines
+        lower_lines = [line.lower() for line in lines]
+        assert len(lower_lines) == len(set(lower_lines))
+
+    @patch("wuzup.cli.image_to_text", return_value="text")
+    @patch("wuzup.cli._make_fetcher")
+    def test_passes_playwright_flag(self, mock_mf, mock_i2t):
+        mock_fetcher = MagicMock()
+        mock_fetcher.fetch_image.return_value = _make_rgb_image()
+        mock_mf.return_value = mock_fetcher
+
+        _web_to_text_command("http://x.com/img.png", use_playwright=True, timeout=15, page_wait_for_timeout=2)
+        mock_mf.assert_called_once_with(True, timeout=15, page_wait_for_timeout=2)
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_fallback_to_playwright_triggers(self, mock_mf):
+        """When requests finds nothing and fallback_to_playwright=True, retry with Playwright."""
+        req_fetcher = MagicMock()
+        req_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        req_fetcher.fetch_images.return_value = []
+
+        pw_fetcher = MagicMock()
+        pw_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="playwright text")
+        pw_fetcher.fetch_images.return_value = []
+
+        mock_mf.side_effect = [req_fetcher, pw_fetcher]
+
+        result = _web_to_text_command("http://example.com", selectors=[".sel"], fallback_to_playwright=True)
+        assert result == "playwright text"
+        assert mock_mf.call_count == 2
+        mock_mf.assert_any_call(False, timeout=30, page_wait_for_timeout=0)
+        mock_mf.assert_any_call(True, timeout=30, page_wait_for_timeout=0)
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_fallback_not_triggered_when_requests_has_data(self, mock_mf):
+        """Fallback is skipped when requests already found text."""
+        req_fetcher = MagicMock()
+        req_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="got it")
+        req_fetcher.fetch_images.return_value = []
+        mock_mf.return_value = req_fetcher
+
+        result = _web_to_text_command("http://example.com", selectors=[".sel"], fallback_to_playwright=True)
+        assert result == "got it"
+        mock_mf.assert_called_once()  # No second call for Playwright
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_fallback_both_empty_raises(self, mock_mf):
+        """ValueError raised when both requests and Playwright fallback find nothing."""
+        req_fetcher = MagicMock()
+        req_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        req_fetcher.fetch_images.return_value = []
+
+        pw_fetcher = MagicMock()
+        pw_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        pw_fetcher.fetch_images.return_value = []
+
+        mock_mf.side_effect = [req_fetcher, pw_fetcher]
+
+        with pytest.raises(ValueError, match="No images or text found"):
+            _web_to_text_command("http://example.com", selectors=[".sel"], fallback_to_playwright=True)
+
+    @patch("wuzup.cli._make_fetcher")
+    def test_fallback_not_used_when_already_playwright(self, mock_mf):
+        """When use_playwright=True, fallback_to_playwright is a no-op (already using Playwright)."""
+        pw_fetcher = MagicMock()
+        pw_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        pw_fetcher.fetch_images.return_value = []
+        mock_mf.return_value = pw_fetcher
+
+        with pytest.raises(ValueError, match="No images or text found"):
+            _web_to_text_command(
+                "http://example.com", selectors=[".sel"], use_playwright=True, fallback_to_playwright=True
+            )
+        mock_mf.assert_called_once()  # No retry
+
+    def test_page_wait_without_playwright_or_fallback_raises(self):
+        """page_wait_for_timeout without --playwright or -F raises ValueError."""
+        with pytest.raises(
+            ValueError, match="--page-wait-for-timeout requires --playwright or --fallback-to-playwright"
         ):
-            result = _images_to_text_command(url="http://example.com/img.png")
-            mock_load.assert_called_once_with("http://example.com/img.png", None, timeout=30)
-            mock_ocr.assert_called_once_with(mock_img)
-        assert result == "URL text"
+            _web_to_text_command("http://example.com", selectors=[".sel"], page_wait_for_timeout=5)
 
-    def test_url_with_selector(self):
-        """Selectors should be passed through to load_images_from_url."""
-        mock_img = _make_rgb_image()
-        with (
-            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
-            patch("wuzup.cli.image_to_text", return_value="selected"),
-        ):
-            result = _images_to_text_command(url="http://example.com/page", selectors=["#main-img"])
-            mock_load.assert_called_once_with("http://example.com/page", ["#main-img"], timeout=30)
-        assert result == "selected"
+    @patch("wuzup.cli._make_fetcher")
+    def test_page_wait_with_fallback_passes_to_playwright(self, mock_mf):
+        """page_wait_for_timeout is forwarded to the Playwright fetcher during fallback."""
+        req_fetcher = MagicMock()
+        req_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="")
+        req_fetcher.fetch_images.return_value = []
 
-    def test_custom_timeout(self):
-        """Custom timeout should be forwarded to load_images_from_url."""
-        mock_img = _make_rgb_image()
-        with (
-            patch("wuzup.cli.load_images_from_url", return_value=[mock_img]) as mock_load,
-            patch("wuzup.cli.image_to_text", return_value="timed"),
-        ):
-            result = _images_to_text_command(url="http://example.com/img.png", timeout=5)
-            mock_load.assert_called_once_with("http://example.com/img.png", None, timeout=5)
-        assert result == "timed"
+        pw_fetcher = MagicMock()
+        pw_fetcher.scrape.return_value = ScrapeResult(img_urls=[], element_text="pw text")
+        pw_fetcher.fetch_images.return_value = []
+
+        mock_mf.side_effect = [req_fetcher, pw_fetcher]
+
+        result = _web_to_text_command(
+            "http://example.com", selectors=[".sel"], fallback_to_playwright=True, page_wait_for_timeout=3
+        )
+        assert result == "pw text"
+        # requests fetcher gets page_wait_for_timeout=0
+        mock_mf.assert_any_call(False, timeout=30, page_wait_for_timeout=0)
+        # Playwright fetcher gets the actual value
+        mock_mf.assert_any_call(True, timeout=30, page_wait_for_timeout=3)
 
 
-# ---------------------------------------------------------------------------
-# main() / CLI argument parsing
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# cli.py — main (argument parsing)
+# ===========================================================================
 
 
 class TestMain:
-    def test_no_args_exits(self):
-        """No arguments should cause SystemExit (required subcommand)."""
-        with patch("sys.argv", ["wuzup"]):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_image_to_text_path(self):
-        """image-to-text --path should call _images_to_text_command."""
-        with (
-            patch("sys.argv", ["wuzup", "image-to-text", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
-        ):
-            main()
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None, timeout=30)
-
-    def test_i2t_alias(self):
-        """i2t alias should work identically."""
-        with (
-            patch("sys.argv", ["wuzup", "i2t", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
-        ):
-            main()
-            mock_cmd.assert_called_once()
-
-    def test_itt_alias(self):
-        """itt alias should work identically."""
-        with (
-            patch("sys.argv", ["wuzup", "itt", "--url", "http://example.com/img.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
-        ):
-            main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None, timeout=30)
-
-    def test_url_with_selector(self):
-        with (
-            patch("sys.argv", ["wuzup", "image-to-text", "--url", "http://example.com", "-s", "img.hero"]),
-            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
-        ):
-            main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com", selectors=["img.hero"], timeout=30)
-
-    def test_main_prints_command_result(self, capsys):
-        """main() should print the return value of _images_to_text_command."""
-        with (
-            patch("sys.argv", ["wuzup", "image-to-text", "--path", "/tmp/img.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value="printed text"),
-        ):
-            main()
-        captured = capsys.readouterr()
-        assert captured.out.strip() == "printed text"
-
-    def test_selector_without_url_exits(self):
-        """--selector with --path (no --url) should cause SystemExit."""
-        with patch("sys.argv", ["wuzup", "image-to-text", "--path", "/tmp/x.png", "-s", "img"]):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_path_and_url_mutually_exclusive(self):
-        """--path and --url together should cause SystemExit."""
-        with patch("sys.argv", ["wuzup", "image-to-text", "--path", "x", "--url", "y"]):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_neither_path_nor_url_exits(self):
-        """Omitting both --path and --url should cause SystemExit."""
-        with patch("sys.argv", ["wuzup", "image-to-text"]):
-            with pytest.raises(SystemExit):
-                main()
-
-    def test_debug_flag_passed(self):
-        with (
-            patch("sys.argv", ["wuzup", "--debug", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value=""),
-            patch("wuzup.cli._debug_setup") as mock_debug,
-        ):
-            main()
-            mock_debug.assert_called_once_with(True, False)
-
-    def test_debug_all_flag_passed(self):
-        with (
-            patch("sys.argv", ["wuzup", "--debug-all", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value=""),
-            patch("wuzup.cli._debug_setup") as mock_debug,
-        ):
-            main()
-            mock_debug.assert_called_once_with(False, True)
-
-    def test_both_debug_flags(self):
-        with (
-            patch("sys.argv", ["wuzup", "--debug", "--debug-all", "image-to-text", "--path", "/tmp/x.png"]),
-            patch("wuzup.cli._images_to_text_command", return_value=""),
-            patch("wuzup.cli._debug_setup") as mock_debug,
-        ):
-            main()
-            mock_debug.assert_called_once_with(True, True)
-
-    def test_explicit_args_parameter(self, capsys):
-        """Passing args directly should bypass sys.argv."""
-        with patch("wuzup.cli._images_to_text_command", return_value="from args") as mock_cmd:
-            main(["image-to-text", "--path", "/tmp/img.png"])
-            mock_cmd.assert_called_once_with(path="/tmp/img.png", url=None, selectors=None, timeout=30)
-        assert capsys.readouterr().out.strip() == "from args"
-
-    def test_timeout_flag(self):
-        """--timeout should be forwarded to _images_to_text_command."""
-        with (
-            patch("sys.argv", ["wuzup", "image-to-text", "--url", "http://example.com/img.png", "-T", "10"]),
-            patch("wuzup.cli._images_to_text_command", return_value="") as mock_cmd,
-        ):
-            main()
-            mock_cmd.assert_called_once_with(path=None, url="http://example.com/img.png", selectors=None, timeout=10.0)
-
-    def test_output_parameter(self):
-        """Passing output should write there instead of stdout."""
+    @patch("wuzup.cli._web_to_text_command", return_value="output")
+    def test_web_to_text_alias_w2t(self, mock_cmd):
         buf = StringIO()
-        with patch("wuzup.cli._images_to_text_command", return_value="to buffer"):
-            main(["image-to-text", "--path", "/tmp/img.png"], output=buf)
-        assert buf.getvalue().strip() == "to buffer"
+        main(["w2t", "-u", "http://example.com"], output=buf)
+        mock_cmd.assert_called_once()
+        assert buf.getvalue().strip() == "output"
+
+    @patch("wuzup.cli._web_to_text_command", return_value="output")
+    def test_web_to_text_alias_wtt(self, mock_cmd):
+        buf = StringIO()
+        main(["wtt", "-u", "http://example.com"], output=buf)
+        mock_cmd.assert_called_once()
+
+    @patch("wuzup.cli._web_to_text_command", return_value="output")
+    def test_web_to_text_full_name(self, mock_cmd):
+        buf = StringIO()
+        main(["web-to-text", "-u", "http://example.com"], output=buf)
+        mock_cmd.assert_called_once()
+
+    @patch("wuzup.cli._web_to_text_command", return_value="text out")
+    def test_passes_all_args(self, mock_cmd):
+        buf = StringIO()
+        main(
+            [
+                "web-to-text",
+                "-u",
+                "http://example.com",
+                "-s",
+                ".a",
+                "-s",
+                ".b",
+                "-T",
+                "15",
+                "--page-wait-for-timeout",
+                "2",
+                "--playwright",
+            ],
+            output=buf,
+        )
+        mock_cmd.assert_called_once_with(
+            url="http://example.com",
+            selectors=[".a", ".b"],
+            timeout=15.0,
+            page_wait_for_timeout=2.0,
+            use_playwright=True,
+            fallback_to_playwright=False,
+        )
+
+    def test_missing_command_exits(self):
+        with pytest.raises(SystemExit):
+            main([])
+
+    @patch("wuzup.cli._web_to_text_command", return_value="x")
+    def test_fallback_flag_parsed(self, mock_cmd):
+        buf = StringIO()
+        main(["w2t", "-u", "http://example.com", "-s", ".a", "-F"], output=buf)
+        mock_cmd.assert_called_once_with(
+            url="http://example.com",
+            selectors=[".a"],
+            timeout=30.0,
+            page_wait_for_timeout=0.0,
+            use_playwright=False,
+            fallback_to_playwright=True,
+        )
+
+    def test_playwright_and_fallback_mutually_exclusive(self):
+        """--playwright and -F cannot be used together."""
+        with pytest.raises(SystemExit):
+            main(["w2t", "-u", "http://example.com", "--playwright", "-F"])
+
+    def test_debug_flags(self):
+        """--debug and --debug-all are parsed without errors."""
+        with patch("wuzup.cli._web_to_text_command", return_value="x"):
+            buf = StringIO()
+            main(["--debug", "--debug-all", "w2t", "-u", "http://example.com"], output=buf)
 
 
-# ---------------------------------------------------------------------------
-# __main__ entry point
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# CLI entry-point module
+# ===========================================================================
 
 
 class TestMainEntryPoint:
-    def test_run_as_module(self):
-        """python -m wuzup with no args should exit with error."""
-        result = subprocess.run(
-            [sys.executable, "-m", "wuzup"],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
-
-    def test_run_as_module_help(self):
-        """python -m wuzup --help should show help and exit 0."""
+    def test_module_invocation(self):
         result = subprocess.run(
             [sys.executable, "-m", "wuzup", "--help"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "wuzup" in result.stdout.lower()
-
-    def test_run_cli_directly(self):
-        """Running cli.py directly should work as an entry point."""
-        result = subprocess.run(
-            [sys.executable, "-c", "from wuzup.cli import main; main()", "--help"],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0
-        assert "wuzup" in result.stdout.lower()
-
-
-# ---------------------------------------------------------------------------
-# Version
-# ---------------------------------------------------------------------------
+        assert "wuzup" in result.stdout
 
 
 class TestVersion:
-    def test_version_defined(self):
-        from wuzup import __version__
+    def test_version_attribute(self):
+        import wuzup
 
-        assert isinstance(__version__, str)
-        assert len(__version__) > 0
+        assert hasattr(wuzup, "__version__")
 
 
-# ---------------------------------------------------------------------------
-# Integration tests (require network + tesseract)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Integration tests (marked so they can be skipped in CI without net)
+# ===========================================================================
 
 
 @pytest.mark.integration
-class TestIntegration:
-    def test_load_images_from_real_url(self):
-        """Fetch a real image from the web."""
-        url = "https://httpbin.org/image/png"
-        images = load_images_from_url(url)
-        assert isinstance(images, list)
-        assert len(images) == 1
-        assert isinstance(images[0], Image.Image)
+class TestIntegrationRequestsFetcher:
+    """Integration test using RequestsFetcher against a stable public URL."""
+
+    def test_fetch_single_image(self):
+        """Fetch a stable PNG from httpbin and verify it's a valid image."""
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        fetcher = RequestsFetcher(timeout=30)
+        img = fetcher.fetch_image("https://httpbin.org/image/png")
+        assert isinstance(img, Image.Image)
+        assert img.size[0] > 0 and img.size[1] > 0
+
+    def test_scrape_with_selectors(self):
+        """Scrape example.com and verify text extraction from a real page."""
+        from wuzup.requests_fetcher import RequestsFetcher
+
+        fetcher = RequestsFetcher(timeout=30)
+        result = fetcher.scrape("http://example.com", ["h1"])
+        # example.com has a stable <h1> with text
+        assert "Example Domain" in result.element_text
+
+
+@pytest.mark.integration
+class TestIntegrationPlaywrightFetcher:
+    """Integration test using PlaywrightFetcher against a stable public URL."""
+
+    def test_scrape_example_com(self):
+        """Render example.com with Playwright and extract the heading."""
+        from wuzup.playwright_fetcher import PlaywrightFetcher
+
+        fetcher = PlaywrightFetcher(timeout=30)
+        result = fetcher.scrape("http://example.com", ["h1"])
+        assert "Example Domain" in result.element_text
+
+    def test_fetch_image_via_playwright_fetcher(self):
+        """PlaywrightFetcher.fetch_image (inherited) works with a real URL."""
+        from wuzup.playwright_fetcher import PlaywrightFetcher
+
+        fetcher = PlaywrightFetcher(timeout=30)
+        img = fetcher.fetch_image("https://httpbin.org/image/png")
+        assert isinstance(img, Image.Image)
+
+
+@pytest.mark.integration
+class TestIntegrationWebToText:
+    """End-to-end integration test for the web-to-text CLI flow."""
+
+    def test_direct_image_url(self):
+        """web-to-text with a direct image URL (no selectors) produces text."""
+        # httpbin.org/image/png is a stable image that shouldn't change.
+        # We just confirm it runs without error and returns a string.
+        result = _web_to_text_command("https://httpbin.org/image/png")
+        assert isinstance(result, str)
+
+    def test_selector_text_fallback(self):
+        """web-to-text with example.com falls back to text since there are no matching images."""
+        result = _web_to_text_command("http://example.com", selectors=["h1"])
+        assert "Example Domain" in result

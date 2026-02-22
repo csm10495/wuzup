@@ -5,7 +5,8 @@ import io
 import logging
 import sys
 
-from wuzup.image import image_to_text, load_image_from_path, load_images_from_url
+from wuzup.fetcher import Fetcher
+from wuzup.image import image_to_text
 
 log = logging.getLogger(__name__)
 
@@ -25,49 +26,156 @@ def _debug_setup(debug: bool, debug_all: bool):
     """
     if debug:
         log.info("Turning on debug logging via --debug")
-        logging.getLogger("wuzup").setLevel(logging.DEBUG)
+        wuzup_logger.setLevel(logging.DEBUG)
     if debug_all:
         log.info("Turning on ALL debug logging via --debug-all")
         logging.getLogger().setLevel(logging.DEBUG)
+        wuzup_logger.setLevel(logging.DEBUG)
 
 
-def _images_to_text_command(
-    path: str | None = None,
-    url: str | None = None,
-    selectors: list[str] | None = None,
-    timeout: float = 30,
-) -> str:
-    """Load image(s) and extract text via OCR.
+def _make_fetcher(use_playwright: bool, timeout: float = 30, page_wait_for_timeout: float = 0) -> Fetcher:
+    """Instantiate the appropriate :class:`Fetcher` subclass.
 
-    Exactly one of *path* or *url* must be provided.
+    Import is deferred so that Playwright is only loaded when needed.
 
     Args:
-        path: Filesystem path to a local image file.
-        url: URL pointing to an image or an HTML page containing one.
-        selectors: Optional list of CSS selectors to locate ``<img>``
-            elements on the page (only used with *url*).  Images matching
-            *any* selector are processed.
+        use_playwright: If ``True``, return a :class:`PlaywrightFetcher`.
         timeout: Timeout in seconds for HTTP requests.
+        page_wait_for_timeout: Extra wait after page load (Playwright only).
 
     Returns:
-        The OCR-extracted text from all matched images.
+        A :class:`Fetcher` instance.
     """
-    if path:
-        images = [load_image_from_path(path)]
-    else:
-        images = load_images_from_url(url, selectors, timeout=timeout)
+    if use_playwright:
+        from wuzup.playwright_fetcher import PlaywrightFetcher
 
-    all_lines: list[str] = []
-    seen: set[str] = set()
-    for image in images:
-        text = image_to_text(image)
-        for line in text.splitlines():
-            key = line.lower()
-            if key not in seen:
-                seen.add(key)
-                all_lines.append(line)
+        log.debug(f"Creating PlaywrightFetcher (timeout={timeout}, page_wait_for_timeout={page_wait_for_timeout})")
+        return PlaywrightFetcher(timeout=timeout, page_wait_for_timeout=page_wait_for_timeout)
 
-    return "\n".join(all_lines)
+    if page_wait_for_timeout:
+        raise ValueError("--page-wait-for-timeout requires --playwright or --fallback-to-playwright")
+
+    from wuzup.requests_fetcher import RequestsFetcher
+
+    log.debug(f"Creating RequestsFetcher (timeout={timeout})")
+    return RequestsFetcher(timeout=timeout)
+
+
+def _scrape_to_text(
+    fetcher: Fetcher,
+    url: str,
+    selectors: list[str],
+) -> str | None:
+    """Scrape *url* with *fetcher* and return extracted text, or ``None``.
+
+    Matched images are OCR'd and combined with the visible text of
+    matched elements.  Returns ``None`` when neither images nor text
+    are found (the "empty" case that may trigger a Playwright fallback).
+
+    Args:
+        fetcher: The :class:`Fetcher` to use.
+        url: Page URL.
+        selectors: CSS selectors to locate elements.
+
+    Returns:
+        Extracted text, or ``None`` if nothing was found.
+    """
+    log.debug(f"Scraping {url} with {len(selectors)} selector(s): {selectors}")
+    result = fetcher.scrape(url, selectors)
+    log.debug(f"Scrape found {len(result.img_urls)} image URL(s) and {len(result.element_text)} chars of text")
+    images = fetcher.fetch_images(result.img_urls)
+
+    parts: list[str] = []
+
+    if images:
+        log.debug(f"Running OCR on {len(images)} fetched image(s)")
+        all_lines: list[str] = []
+        seen: set[str] = set()
+        for image in images:
+            text = image_to_text(image)
+            for line in text.splitlines():
+                key = line.lower()
+                if key not in seen:
+                    seen.add(key)
+                    all_lines.append(line)
+        log.debug(f"OCR produced {len(all_lines)} unique line(s)")
+        parts.append("\n".join(all_lines))
+
+    if result.element_text.strip():
+        log.debug("Including element text in output")
+        parts.append(result.element_text)
+
+    if parts:
+        return "\n".join(parts)
+
+    return None
+
+
+def _web_to_text_command(
+    url: str,
+    selectors: list[str] | None = None,
+    timeout: float = 30,
+    page_wait_for_timeout: float = 0,
+    use_playwright: bool = False,
+    fallback_to_playwright: bool = False,
+) -> str:
+    """Fetch images and text from a web page via selectors.
+
+    OCR text from matched images and visible element text are combined.
+    If neither images nor text are found a ``ValueError`` is raised.
+
+    When *fallback_to_playwright* is ``True`` and the initial requests-based
+    fetch finds no data, the page is re-fetched using Playwright before
+    raising.  Connection errors and other exceptions are **not** caught
+    by the fallback — only the "no data matched" case triggers it.
+
+    Args:
+        url: URL pointing to an image or an HTML page containing one.
+        selectors: Optional list of CSS selectors to locate ``<img>``
+            elements on the page.  Images matching *any* selector are
+            processed.  When ``None`` the *url* is fetched as a direct
+            image link.
+        timeout: Timeout in seconds for HTTP requests.
+        page_wait_for_timeout: Extra time in seconds to wait after page
+            load for JavaScript redirects.
+        use_playwright: If ``True``, use Playwright to render the page
+            (evaluates JavaScript).  Defaults to ``False``.
+        fallback_to_playwright: If ``True``, try with plain requests
+            first and automatically retry with Playwright when no data
+            is found.  Mutually exclusive with *use_playwright*.
+
+    Returns:
+        Combined OCR text from matched images and visible element text.
+    """
+    log.debug(f"web-to-text called with url={url}, selectors={selectors}")
+
+    if page_wait_for_timeout and not use_playwright and not fallback_to_playwright:
+        raise ValueError("--page-wait-for-timeout requires --playwright or --fallback-to-playwright")
+
+    fetcher = _make_fetcher(
+        use_playwright,
+        timeout=timeout,
+        page_wait_for_timeout=page_wait_for_timeout if use_playwright else 0,
+    )
+
+    if not selectors:
+        log.debug(f"No selectors given; treating URL as direct image: {url}")
+        image = fetcher.fetch_image(url)
+        return image_to_text(image)
+
+    text = _scrape_to_text(fetcher, url, selectors)
+    if text is not None:
+        return text
+
+    # Nothing found - try Playwright fallback if requested.
+    if fallback_to_playwright and not use_playwright:
+        log.info("No data found via requests; falling back to Playwright")
+        pw_fetcher = _make_fetcher(True, timeout=timeout, page_wait_for_timeout=page_wait_for_timeout)
+        text = _scrape_to_text(pw_fetcher, url, selectors)
+        if text is not None:
+            return text
+
+    raise ValueError("No images or text found matching selectors")
 
 
 def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
@@ -87,36 +195,62 @@ def main(args: list[str] | None = None, output: io.TextIOBase | None = None):
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    itt_parser = subparsers.add_parser(
-        "image-to-text", aliases=["i2t", "itt"], help="Extract text from an image using OCR."
+    # ── web-to-text ─────────────────────────────────────────────────
+    wtt_parser = subparsers.add_parser(
+        "web-to-text",
+        aliases=["w2t", "wtt"],
+        help="Extract text from a web page: OCR matched images first, fall back to element text.",
     )
-    source_group = itt_parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument("-p", "--path", type=str, help="Path to a local image file.")
-    source_group.add_argument("-u", "--url", type=str, help="URL to an image or a page containing an image.")
-    itt_parser.add_argument(
+    wtt_parser.add_argument("-u", "--url", type=str, required=True, help="URL to a page (or direct image).")
+    wtt_parser.add_argument(
         "-s",
         "--selector",
         type=str,
         action="append",
         dest="selectors",
-        help="CSS selector to find an image on the page (only with --url). Can be specified multiple times.",
+        help="CSS selector to find images/elements on the page. Can be specified multiple times.",
     )
-    itt_parser.add_argument(
+    wtt_parser.add_argument(
         "-T",
         "--timeout",
         type=float,
         default=30,
         help="Timeout in seconds for HTTP requests (default: 30).",
     )
+    wtt_parser.add_argument(
+        "--page-wait-for-timeout",
+        type=float,
+        default=0,
+        help="Extra time in seconds to wait after page load for JS redirects (default: 0). Only allowed if --playwright is used.",
+    )
+    pw_group = wtt_parser.add_mutually_exclusive_group()
+    pw_group.add_argument(
+        "--playwright",
+        action="store_true",
+        default=False,
+        help="Use Playwright (headless Chromium) to render the page with JavaScript. Without this flag, plain HTTP requests are used.",
+    )
+    pw_group.add_argument(
+        "-F",
+        "--fallback-to-playwright",
+        action="store_true",
+        default=False,
+        help="Use plain requests first; if no data is found, retry with Playwright. Mutually exclusive with --playwright.",
+    )
 
     args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
 
-    if args.command in ("image-to-text", "i2t", "itt"):
-        if args.selectors and not args.url:
-            parser.error("--selector can only be used with --url")
+    if args.command in ("web-to-text", "w2t", "wtt"):
         print(
-            _images_to_text_command(path=args.path, url=args.url, selectors=args.selectors, timeout=args.timeout),
+            _web_to_text_command(
+                url=args.url,
+                selectors=args.selectors,
+                timeout=args.timeout,
+                page_wait_for_timeout=args.page_wait_for_timeout,
+                use_playwright=args.playwright,
+                fallback_to_playwright=args.fallback_to_playwright,
+            ),
             file=output,
         )
 
