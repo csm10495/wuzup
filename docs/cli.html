@@ -70,36 +70,62 @@ el.replaceWith(d);
 
     subparsers = parser.add_subparsers(dest=&#34;command&#34;, required=True)
 
-    itt_parser = subparsers.add_parser(
-        &#34;image-to-text&#34;, aliases=[&#34;i2t&#34;, &#34;itt&#34;], help=&#34;Extract text from an image using OCR.&#34;
+    # ── web-to-text ─────────────────────────────────────────────────
+    wtt_parser = subparsers.add_parser(
+        &#34;web-to-text&#34;,
+        aliases=[&#34;w2t&#34;, &#34;wtt&#34;],
+        help=&#34;Extract text from a web page: OCR matched images first, fall back to element text.&#34;,
     )
-    source_group = itt_parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument(&#34;-p&#34;, &#34;--path&#34;, type=str, help=&#34;Path to a local image file.&#34;)
-    source_group.add_argument(&#34;-u&#34;, &#34;--url&#34;, type=str, help=&#34;URL to an image or a page containing an image.&#34;)
-    itt_parser.add_argument(
+    wtt_parser.add_argument(&#34;-u&#34;, &#34;--url&#34;, type=str, required=True, help=&#34;URL to a page (or direct image).&#34;)
+    wtt_parser.add_argument(
         &#34;-s&#34;,
         &#34;--selector&#34;,
         type=str,
         action=&#34;append&#34;,
         dest=&#34;selectors&#34;,
-        help=&#34;CSS selector to find an image on the page (only with --url). Can be specified multiple times.&#34;,
+        help=&#34;CSS selector to find images/elements on the page. Can be specified multiple times.&#34;,
     )
-    itt_parser.add_argument(
+    wtt_parser.add_argument(
         &#34;-T&#34;,
         &#34;--timeout&#34;,
         type=float,
         default=30,
         help=&#34;Timeout in seconds for HTTP requests (default: 30).&#34;,
     )
+    wtt_parser.add_argument(
+        &#34;--page-wait-for-timeout&#34;,
+        type=float,
+        default=0,
+        help=&#34;Extra time in seconds to wait after page load for JS redirects (default: 0). Only allowed if --playwright is used.&#34;,
+    )
+    pw_group = wtt_parser.add_mutually_exclusive_group()
+    pw_group.add_argument(
+        &#34;--playwright&#34;,
+        action=&#34;store_true&#34;,
+        default=False,
+        help=&#34;Use Playwright (headless Chromium) to render the page with JavaScript. Without this flag, plain HTTP requests are used.&#34;,
+    )
+    pw_group.add_argument(
+        &#34;-F&#34;,
+        &#34;--fallback-to-playwright&#34;,
+        action=&#34;store_true&#34;,
+        default=False,
+        help=&#34;Use plain requests first; if no data is found, retry with Playwright. Mutually exclusive with --playwright.&#34;,
+    )
 
     args = parser.parse_args(args)
     _debug_setup(args.debug, args.debug_all)
 
-    if args.command in (&#34;image-to-text&#34;, &#34;i2t&#34;, &#34;itt&#34;):
-        if args.selectors and not args.url:
-            parser.error(&#34;--selector can only be used with --url&#34;)
+    if args.command in (&#34;web-to-text&#34;, &#34;w2t&#34;, &#34;wtt&#34;):
         print(
-            _images_to_text_command(path=args.path, url=args.url, selectors=args.selectors, timeout=args.timeout),
+            _web_to_text_command(
+                url=args.url,
+                selectors=args.selectors,
+                timeout=args.timeout,
+                page_wait_for_timeout=args.page_wait_for_timeout,
+                use_playwright=args.playwright,
+                fallback_to_playwright=args.fallback_to_playwright,
+            ),
             file=output,
         )</code></pre>
 </details>
