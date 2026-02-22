@@ -52,7 +52,10 @@ jobs:
       operating-system: 'windows-latest'
       executable-name: wuzup.exe
       entrypoint-file: wuzup/__main__.py
-      pre-build-cmd: choco install tesseract -y
+      pre-build-cmd: |
+        choco install tesseract -y
+        C:/msys64/usr/bin/pacman.exe -S --noconfirm mingw-w64-x86_64-cairo
+        echo "C:\msys64\mingw64\bin" >> $GITHUB_PATH
       extra-args: '--add-data "C:\Program Files\Tesseract-OCR;tesseract" --collect-all cairocffi --collect-all cairosvg'
 
   pypi-upload:
