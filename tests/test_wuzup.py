@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from wuzup.cli import _debug_setup, _make_fetcher, _web_to_text_command, main
-from wuzup.fetcher import Fetcher, ScrapeResult
+from wuzup.fetcher import Fetcher, ScrapeResult, _is_svg, _svg_to_pil
 from wuzup.image import composite_on_color, image_to_text, load_image_from_path, ocr_variant
 
 # ---------------------------------------------------------------------------
@@ -44,6 +44,57 @@ def _mock_page_cm(mock_page):
         yield mock_page
 
     return _cm
+
+
+# ===========================================================================
+# fetcher.py — _is_svg / _svg_to_pil
+# ===========================================================================
+
+
+class TestIsSvg:
+    def test_bare_svg_tag(self):
+        assert _is_svg(b"<svg><rect/></svg>") is True
+
+    def test_xml_declaration_with_svg(self):
+        assert _is_svg(b'<?xml version="1.0"?><svg><circle/></svg>') is True
+
+    def test_leading_whitespace(self):
+        assert _is_svg(b"   \n  <svg></svg>") is True
+
+    def test_png_bytes(self):
+        img_bytes = _image_to_bytes(_make_rgb_image())
+        assert _is_svg(img_bytes) is False
+
+    def test_empty_bytes(self):
+        assert _is_svg(b"") is False
+
+    def test_plain_xml_without_svg(self):
+        assert _is_svg(b'<?xml version="1.0"?><html></html>') is False
+
+
+class TestSvgToPil:
+    def test_converts_simple_svg(self):
+        svg_data = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>'
+        result = _svg_to_pil(svg_data)
+        assert isinstance(result, Image.Image)
+        assert result.size == (10, 10)
+
+    @patch("wuzup.fetcher.cairosvg", create=True)
+    def test_calls_cairosvg_svg2png(self, mock_cairosvg):
+        """Verify _svg_to_pil delegates to cairosvg.svg2png."""
+        png_img = _make_rgb_image()
+        mock_cairosvg.svg2png.return_value = _image_to_bytes(png_img)
+
+        # We need to patch at the point of import inside the function
+        with patch("wuzup.fetcher.cairosvg", mock_cairosvg, create=True):
+            # Since cairosvg is lazily imported, we need to mock the import
+            import wuzup.fetcher as fetcher_mod
+
+            with patch.dict("sys.modules", {"cairosvg": mock_cairosvg}):
+                result = fetcher_mod._svg_to_pil(b"<svg></svg>")
+
+        mock_cairosvg.svg2png.assert_called_once_with(bytestring=b"<svg></svg>")
+        assert isinstance(result, Image.Image)
 
 
 # ===========================================================================
@@ -108,6 +159,23 @@ class TestFetcher:
         mock_get.assert_called_once_with("http://example.com/img.png", timeout=5)
         mock_resp.raise_for_status.assert_called_once()
         assert isinstance(result, Image.Image)
+
+    @patch("wuzup.fetcher._svg_to_pil")
+    @patch("wuzup.fetcher.requests.get")
+    def test_fetch_image_svg_content(self, mock_get, mock_svg_to_pil):
+        """SVG responses are routed through _svg_to_pil."""
+        svg_data = b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+        mock_resp = MagicMock()
+        mock_resp.content = svg_data
+        mock_get.return_value = mock_resp
+        expected_img = _make_rgb_image()
+        mock_svg_to_pil.return_value = expected_img
+
+        f = _ConcreteFetcher()
+        result = f.fetch_image("http://example.com/icon.svg")
+
+        mock_svg_to_pil.assert_called_once_with(svg_data)
+        assert result is expected_img
 
     @patch("wuzup.fetcher.requests.get")
     def test_fetch_images_skips_failures(self, mock_get):
