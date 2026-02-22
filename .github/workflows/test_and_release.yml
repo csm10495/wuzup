@@ -10,13 +10,15 @@ jobs:
       # by default, operating-systems points to ubuntu/mac/windows
       pre-install-script: |
         if [[ "$RUNNER_OS" == "Linux" ]]; then
-          sudo apt-get update && sudo apt-get install -y libcairo2-dev
+          sudo apt-get update && sudo apt-get install -y libcairo2-dev tesseract-ocr
         elif [[ "$RUNNER_OS" == "macOS" ]]; then
-          brew install cairo
+          brew install cairo tesseract
           echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
         elif [[ "$RUNNER_OS" == "Windows" ]]; then
-          echo "cairo is bundled via pip on Windows"
+          choco install tesseract -y
+          echo "C:\Program Files\Tesseract-OCR" >> $GITHUB_PATH
         fi
+        pip install playwright && python -m playwright install --with-deps chromium
 
   markdown-autodocs:
     needs: test
